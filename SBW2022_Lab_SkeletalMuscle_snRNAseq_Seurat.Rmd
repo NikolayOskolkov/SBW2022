@@ -1,0 +1,473 @@
+---
+title: "Analysis of snRNAseq Data from Human and Chimp Skeletal Muscle Cells"
+author: "Nikolay Oskolkov, NBIS SciLifeLab, nikolay.oskolkov@scilifelab.se"
+date: "April 29, 2019"
+output:
+  html_document:
+    toc: yes
+  pdf_document:
+    toc: yes
+subtitle: PIs of the project are Ola Hansson, Lund University, and Svante Pääbo, Max-Planck Institute Leipzig
+abstract: |
+  In this document we will apply Seurat pipeline to 10X snRNAseq data from human and chimp skeletal muscles cells. More specifically, we will check whether we find clustering with respect to skeletal muscle type 1 and type 2A / 2X fibrotypes. This analysis was published in Skeletal Muscle in 2022, https://skeletalmusclejournal.biomedcentral.com/articles/10.1186/s13395-022-00299-4, if you use the data for your research, we kindly ask you to cite the study.
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir="/home/nikolay/Documents/Conferences/SBW2022")
+```
+
+### Reading and Filtering Data
+
+Let us start with loading packages:
+
+```{r}
+library("Seurat")
+library("dplyr")
+library("data.table")
+library("matrixStats")
+library("DoubletFinder")
+```
+
+Now we will load Skeletal Muscle scRNAseq un-normalized data and have a look:
+
+```{r}
+expr <- suppressWarnings(as.data.frame(fread("unzip -p SkeletalMuscle_HumanChimp_10X.zip",sep="\t")))
+rownames(expr)<-expr$V1; expr$V1<-NULL;
+expr <- expr[rowSums(expr) != 0,]
+#expr <- expr[rowMeans(as.matrix(expr)) >= 0.1,]
+expr[1:5,1:5]
+print(paste0("DATASET CONTAINS ",dim(expr)[1]," GENES AND ",dim(expr)[2]," CELLS"))
+```
+
+First we are going to look at which genes are most expressed in our data set:
+
+```{r,fig.width=10,fig.height=8}
+head(sort(rowSums(expr), decreasing=TRUE), 20)
+barplot(log10(as.numeric(sort(rowSums(expr), decreasing=TRUE)) + 1), xlim=c(0,20), names = names(sort(rowSums(expr), decreasing=TRUE)),ylab="LOG10(EXPR)",las=2)
+```
+
+MALAT1 is a nuclear lincRNA which is very abundant. Typically in scRNAseq experiments, high expression of MALAT1 indicates that the cellular membrane is broken and cytoplasmic mRNA starts leaking out. Some studies show that MALAT1 expression is correlated with the mitochondrial contamination. However, in our case of snRNAseq, high expression of MALAT1 is to be expected. Still common practice is to remove this gene from the data set because of unknown reasons for such a high expression. Additional reason is that high expression of MALAT1 can be hard for normalization algorithms. So here we are going to remove MALAT1 genes from the further downstream analysis:
+
+```{r}
+expr<-expr[-which(rownames(expr)=="MALAT1"),]
+```
+
+What about ribosomal gene families expression (RPS and RPL genes)? Their expression is also considered to be a contamination. Let us first display the ribosomal genes:
+
+```{r}
+rownames(expr)[grepl(paste0(c("^RPS","^RPL"),collapse="|"),rownames(expr))]
+```
+
+Let us now rank all cells by the percentage of ribosomal genes expressed in them:
+
+```{r,fig.width=10,fig.height=8}
+ribosom_genes_expr_matrix <- expr[rownames(expr)[grepl(paste0(c("^RPS","^RPL"),collapse="|"),rownames(expr))],]
+percent_ribosom_expr <- colSums(ribosom_genes_expr_matrix) / colSums(expr)
+head(sort(percent_ribosom_expr, decreasing=TRUE), 20)
+barplot(sort(percent_ribosom_expr, decreasing=TRUE), xlim=c(0,1000),las=2)
+```
+
+It looks like we have quite a few nuceli with high (up to 19%) of their UMI due to ribosomal gene families. What can it mean? Well, ribosomal proteins are house keeping genes that may not be clearly related to cell type. The ribosomal genes are often removed to make clustering of cell types more transparrent as they have more or less similar expression across cells and thus do not contribute to cell type identification. In this analysis we will remove the ribosomal protein genes:
+
+```{r}
+expr<-expr[grepl(paste0(c("^RPS","^RPL"),collapse="|"),rownames(expr))==FALSE,]
+```
+
+Now let us display mitochondrial genes:
+
+```{r}
+rownames(expr)[grepl("^MT\\.",rownames(expr))]
+```
+
+Presence of those genes usually imply contamination, i.e. when cell membrane is broken, the nuclear RNA floats away but the mitochondrial RNA is still in tact. In our case, if we see nuclei with mitochondrial genes expressed, this would mean that mitochondrial got stuck to the nuclei somehow during the nuclei library prep. Anyhow, nuclei with mitochondrial genes expressed should be filtered out. Let us rank all cell by the percentage of mitochondrial genes expressed:
+
+```{r,fig.width=10,fig.height=8}
+mito_genes_expr_matrix <- expr[rownames(expr)[grepl("^MT\\.",rownames(expr))],]
+percent_mito_expr <- colSums(mito_genes_expr_matrix) / colSums(expr)
+head(sort(percent_mito_expr, decreasing=TRUE), 20)
+barplot(sort(percent_mito_expr, decreasing=TRUE), xlim=c(0,1000),las=2)
+```
+
+It seems that quite a few cells have high (up to 25%) percentage of their library sizes due to mitochndrial contamination. Let us display the names of the cells with >5% of their library size contributed by mitochondrial gene expression.
+
+```{r}
+names(percent_mito_expr[percent_mito_expr>0.05])
+sum(grepl("human",names(percent_mito_expr[percent_mito_expr>0.05]))==TRUE)/sum(grepl("human",names(percent_mito_expr)))
+sum(grepl("chimp",names(percent_mito_expr[percent_mito_expr>0.05]))==TRUE)/sum(grepl("chimp",names(percent_mito_expr)))
+```
+
+We can see that the majority of contaminated cells come from the human, i.e. approximately 3% of human cells are contaminated while only about 1% of chimp cells demonstrate high mitochondrial gene expression. Here we are going to filter out the contaminated nuclei with >1% of their UMIs due to mitochondrial genes:
+
+```{r}
+expr[,names(percent_mito_expr[percent_mito_expr>0.01])] <- NULL
+```
+
+Now everything is ready for running the Seurat pipeline. We should not see lots of cells with mitochondrial contamination at the end.
+
+
+### Performing Quality Control
+
+The steps below encompass the standard pre-processing workflow for scRNA-seq data in Seurat. These represent the creation of a Seurat object, the selection and filtration of cells based on QC metrics, data normalization and scaling, and the detection of highly variable features.
+
+In order to proceed with Seurat pipeine we will have to convert the un-normalized expression matrix into Seurat object. We will keep all features expressed in >= 1 cells (~0.02% of the data) and keep all cells with at least 50 detected features:
+
+```{r}
+skm <- CreateSeuratObject(counts = expr, project = "SKM", min.cells = 1, min.features = 0, meta.data=data.frame(row.names=colnames(expr),orig.ident=matrix(unlist(strsplit(colnames(expr),"_")),ncol=2,byrow=TRUE)[,2]))
+skm@active.ident<-as.factor(skm$orig.ident)
+skm
+```
+
+The number of features and UMIs (nFeature_RNA and nCount_RNA) are automatically calculated for every object by Seurat.  For non-UMI data, nCount_RNA represents the sum of the non-normalized values within a cell i.e. library size. nFeature_RNA is a number of non-zero counts per cell. We calculate the percentage of mitochondrial features here and store it in object metadata as *percent.mito*. We use raw count data since this represents non-transformed and non-log-normalized counts. The % of UMI mapping to MT-features is a common scRNA-seq QC metric.
+
+```{r,fig.width=10,fig.height=8}
+mito.features <- grep(pattern = "^MT\\.", x = rownames(x = skm), value = TRUE)
+
+# Calculate % of mitochondrial genes per cell
+percent.mito <- Matrix::colSums(x = GetAssayData(object = skm, slot = 'counts')[mito.features, ]) / Matrix::colSums(x = GetAssayData(object = skm, slot = 'counts'))
+
+# The [[ operator can add columns to object metadata, and is a great place to stash QC stats
+skm[['percent.mito']] <- percent.mito
+VlnPlot(object = skm, features = c("nFeature_RNA", "nCount_RNA", "percent.mito"), ncol = 3)
+```
+
+Thus we have in average 200 genes detected per cell while a typical library size is 400-450. This is not a fantastic coverage but still tolerable for 10X data. Good news is that we do not seem to have many detected mitochondrial genes, i.e. they contribute less than 1% of the library sizes of the cells. Now we will check how nFeature_RNA is connected with nCount_RNA:
+
+```{r,fig.width=10,fig.height=8}
+FeatureScatter(object = skm, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+```
+
+We conclude that larger library sizes (nCount_RNA) give more detected genes per cell (nFeature_RNA). 
+
+Now we will normalize the data. By default, Seurat employs a global-scaling normalization method “LogNormalize” that normalizes the feature expression measurements for each cell by the total expression, multiplies this by a scale factor (10,000 by default), and log-transforms the result. However, one can also use a more recent and intelligent SCTransform normalization, https://pubmed.ncbi.nlm.nih.gov/31870423/, that regresses out the dependence of gene expression of sequencing depth individually for lowly, moderately and highly expressed genes.
+
+```{r}
+skm <- NormalizeData(object = skm, normalization.method = "LogNormalize", scale.factor = 1e4)
+
+# store mitochondrial percentage in object meta data
+#skm <- PercentageFeatureSet(skm, pattern = "^MT-", col.name = "percent.mt")
+# run sctransform
+#skm <- SCTransform(skm, vars.to.regress = "percent.mt", verbose = TRUE)
+```
+
+Now we will identify Highly Variable Genes (HVGs) wich will be used for dimensionality reduction. FindVariableFeatures calculates the average expression and dispersion for each feature, places these features into bins, and then calculates a z-score for dispersion within each bin. This helps control for the relationship between variability and average expression.
+
+```{r,fig.width=10,fig.height=8}
+skm <- FindVariableFeatures(object = skm, nfeatures = dim(skm)[1])
+length(x = VariableFeatures(object = skm))
+```
+
+Thus we have `r length(x = VariableFeatures(object = skm))` Highly Variable Genes (HVGs) which we will use for further downstream analysis.
+
+
+### Principal Component Analysis (PCA)
+
+The single cell dataset likely contains "uninteresting" sources of variation. This could include not only technical noise, but batch effects, or even biological sources of variation (cell cycle stage). To mitigate the effect of these signals, Seurat constructs linear models to predict feature expression based on user-defined variables. The scaled z-scored residuals of these models are stored in the *scale.data* slot, and are used for dimensionality reduction and clustering.
+
+We can regress out cell-cell variation in feature expression driven by batch (if applicable), cell alignment rate (as provided by Drop-seq tools for Drop-seq data), the number of detected molecules, and mitochondrial feature expression. For cycling cells, we can also learn a "cell-cycle" score and regress this out as well. Here we regress on the number of detected molecules per cell.
+
+```{r scale}
+skm <- ScaleData(object = skm, features = rownames(x = skm), vars.to.regress = c("nCount_RNA","percent.mito"))
+```
+
+Next we will perform linear Dimensionality Reduction which is a Principal Component Analysis (PCA) in this case:
+
+```{r pca,fig.width=10,fig.height=8}
+skm <- RunPCA(object = skm, features = VariableFeatures(object = skm), verbose = FALSE)
+```
+
+We can see genes contributing to the loadings of the principal components. Let us now visualize loadings for the first two PCs:
+
+```{r,fig.width=10,fig.height=8}
+print(x = skm[['pca']], dims = 1:5, nfeatures = 5, projected = FALSE)
+VizDimLoadings(object = skm, dims = 1:2)
+```
+
+and display the PCA plot itself:
+
+```{r,fig.width=10,fig.height=8}
+DimPlot(object = skm, group.by="orig.ident", pt.size=1.2)
+skm <- ProjectDim(object = skm)
+DimHeatmap(object = skm, dims = 1, cells = 500, balanced = TRUE)
+DimHeatmap(object = skm, dims = 2, cells = 500, balanced = TRUE)
+DimHeatmap(object = skm, dims = 3, cells = 500, balanced = TRUE)
+DimHeatmap(object = skm, dims = 1:12, cells = 500, balanced = TRUE)
+```
+
+The next step is to decide how many principal components to keep for further downstream analysis. This step is another filtering step, in this way we eliminate noisy genes and keep only most informative ones. PC selection can be viewed as identifying the true dimensionality of a dataset
+
+Seurat uses a resampling test inspired by the "JackStraw" procedure. It randomly permutes a subset of the data (1% by default) and rerun PCA, constructing a ‘null distribution’ of gene scores, and repeat this procedure. We identify ‘significant’ PCs as those who have a strong enrichment of low p-value genes.
+
+```{r jackstraw,fig.width=10,fig.height=8}
+skm <- JackStraw(object = skm, num.replicate = 10)
+skm <- ScoreJackStraw(object = skm, dims = 1:20)
+JackStrawPlot(object = skm, dims = 1:20)
+ElbowPlot(object = skm)
+```
+
+Seurat provides a visualization tool for comparing the distribution of p-values for each PC with a uniform distribution (dashed line). ‘Significant’ PCs will show a strong enrichment of genes with low p-values (solid curve above the dashed line). In this case it appears that PCs 1-5 are significant.
+
+
+### Cell Cycle Assignment
+
+Having created the PCA plot we can now use known cell cycle gene markers in order to assign a cell cycle status to each cell in order to see if the cycling cells form a separate cluster. A list of cell cycle markers, from Tirosh et al, 2015, is loaded with Seurat.  We can segregate this list into markers of G2/M phase and markers of S phase:
+
+```{r}
+cc.genes
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+```
+
+First, we assign each cell a score, based on its expression of G2/M and S phase markers. These marker sets should be anticorrelated in their expression levels, and cells expressing neither are likely not cycling and in G1 phase.
+
+```{r}
+skm <- CellCycleScoring(object = skm, s.features = s.genes, g2m.features = g2m.genes, set.ident = TRUE)
+# view cell cycle scores and phase assignments
+head(x = skm[[]])
+table(skm[[]]$Phase)
+skm@meta.data$old.ident<-as.factor(skm@active.ident)
+```
+
+Good news is that the vast majority of cells do not seem to be cycling, i.e. they are in the G1 phase. Around 1600 cells though seem to be in G2M / S phase, which is not that bad, but the most important is to check now that those ~1600 cells do not form a separate cluster but spread uniformly through the cell lineage clusters.
+
+```{r,fig.width=10,fig.height=8}
+skm <- RunPCA(object = skm, features = VariableFeatures(object = skm), verbose = FALSE)
+DimPlot(object = skm, pt.size=1.2)
+```
+
+Well, we do not seem to observe a separate cluster for the cycling cells on the PCA plot, the G2M and S cells seem to be spread across the PCA plot. What about tSNE, will we see the cycling cells cluster there?
+
+
+### Dimensionality Reduction and Clustering
+
+Seurat uses graph-based clustering algorithm similar to Shared Nearest Neighbor (SNN). This method embeds cells in a graph structure - for example a K-nearest neighbor (KNN) graph, with edges drawn between cells with similar gene expression patterns, and then attempts to partition this graph into highly interconnected ‘quasi-cliques’ or ‘communities’. We first construct a KNN graph based on the euclidean distance in PCA space, and refine the edge weights between any two cells based on the shared overlap in their local neighborhoods (Jaccard similarity). To cluster the cells, we apply modularity optimization techniques such as the Louvain algorithm (default). 
+
+```{r}
+skm <- FindNeighbors(object = skm, dims = 1:5)
+skm <- FindClusters(object = skm, resolution = 0.3)
+```
+
+Here we will also identify doublets using DoubletFinder tool:
+
+```{r}
+#prior expectation is that 4% of cells are doublets
+nExp <- round(ncol(skm) * 0.04)
+skm <- doubletFinder_v3(skm, pN = 0.25, pK = 0.09, nExp = nExp, PCs = 1:5)
+#save doublet finder prediction name
+DF.name = colnames(skm@meta.data)[grepl("DF.classification", colnames(skm@meta.data))]
+```
+
+Here we perform dimensionality reduction with tSNE and color the identified clusters by the graph-based clustering algorithm.
+
+```{r tsne,fig.width=10,fig.height=8}
+opt_perp <- round(sqrt(length(skm@active.ident)),0)
+opt_perp
+skm <- RunTSNE(object = skm, dims = 1:5, perplexity = opt_perp, check_duplicates = FALSE)
+#skm <- RunUMAP(object = skm, reduction.use = "pca", dims = 1:20, min_dist = 0.75)
+DimPlot(object = skm, reduction = 'tsne', pt.size=1.2, label=TRUE, label.size=8)
+DimPlot(object = skm, reduction = 'tsne', group.by="orig.ident", pt.size=1.2)
+DimPlot(object = skm, reduction = 'tsne', group.by="old.ident", pt.size=1.2)
+DimPlot(object = skm, reduction = 'tsne', group.by=DF.name, pt.size=1.2)
+DimPlot(object = skm, reduction = 'pca', pt.size=1.2)
+```
+
+It looks like human cells form two very distinct clusters, while the chimp cells are less obviously clustered into two blobs. The forths cluster where the human and chimp cells overlap might be some rare cell population or just poor quality cells, some more thorough analysis is needed here. Good news is that the cycling cells are spread homogeneously across all the clusters and do not form a separate cluster.
+
+Let us check the numbers of cells in each cluster:
+
+```{r}
+table(skm@active.ident)
+cell_assignment<-data.frame(CELL=names(skm@active.ident),CLUSTER=as.numeric(as.character(skm@active.ident)))
+print(head(cell_assignment))
+write.table(cell_assignment,file="snRNAseq_cell_assignment.txt",col.names=TRUE,row.names=FALSE,quote=FALSE,sep="\t")
+write.table(expr,file="snRNAseq_Human_Chimp_SKM_SeuratFiltered.txt",col.names=TRUE,row.names=TRUE,quote=FALSE,sep="\t")
+
+cell_human_assignment<-cell_assignment[cell_assignment$CLUSTER==1 | cell_assignment$CLUSTER==2,]
+cell_human_assignment<-cell_human_assignment[grepl("human",as.character(cell_human_assignment$CELL))==TRUE,]
+print(head(cell_human_assignment))
+expr_human<-subset(expr,select=colnames(expr)[colnames(expr)%in%as.character(cell_human_assignment$CELL)])
+write.table(cell_human_assignment,file="snRNAseq_cell_human_assignment.txt",col.names=TRUE,row.names=FALSE,quote=FALSE,sep="\t")
+write.table(expr_human,file="snRNAseq_Human_SKM_SeuratFiltered.txt",col.names=TRUE,row.names=TRUE,quote=FALSE,sep="\t")
+
+cell_chimp_assignment<-cell_assignment[cell_assignment$CLUSTER==0 | cell_assignment$CLUSTER==3,]
+cell_chimp_assignment<-cell_chimp_assignment[grepl("chimp",as.character(cell_chimp_assignment$CELL))==TRUE,]
+print(head(cell_chimp_assignment))
+expr_chimp<-subset(expr,select=colnames(expr)[colnames(expr)%in%as.character(cell_chimp_assignment$CELL)])
+write.table(cell_chimp_assignment,file="snRNAseq_cell_chimp_assignment.txt",col.names=TRUE,row.names=FALSE,quote=FALSE,sep="\t")
+write.table(expr_chimp,file="snRNAseq_Chimp_SKM_SeuratFiltered.txt",col.names=TRUE,row.names=TRUE,quote=FALSE,sep="\t")
+```
+
+Let us find markers for each cluster:
+
+```{r cluster markers}
+# find all markers of cluster 0,1,2,3,4
+cluster0.markers <- FindMarkers(object = skm, ident.1 = 0, min.pct = 0.25)
+head(x = cluster0.markers, n = 10)
+cluster1.markers <- FindMarkers(object = skm, ident.1 = 1, min.pct = 0.25)
+head(x = cluster1.markers, n = 10)
+cluster2.markers <- FindMarkers(object = skm, ident.1 = 2, min.pct = 0.25)
+head(x = cluster2.markers, n = 10)
+cluster3.markers <- FindMarkers(object = skm, ident.1 = 3, min.pct = 0.25)
+head(x = cluster3.markers, n = 10)
+cluster4.markers <- FindMarkers(object = skm, ident.1 = 4, min.pct = 0.25)
+head(x = cluster4.markers, n = 10)
+#cluster5.markers <- FindMarkers(object = skm, ident.1 = 5, min.pct = 0.25)
+#head(x = cluster5.markers, n = 10)
+#cluster6.markers <- FindMarkers(object = skm, ident.1 = 6, min.pct = 0.25)
+#head(x = cluster6.markers, n = 10)
+```
+
+..and display violin plots for a couple of cluster markers:
+
+```{r,fig.width=10,fig.height=8}
+VlnPlot(object = skm, features = c("MYBPC1", "MYH7B","ABCA5"))
+```
+
+Now we can find markers for every cluster compared to all remaining cells, report only the positive ones:
+
+```{r}
+skm.markers <- FindAllMarkers(object = skm, only.pos = TRUE, min.pct = 0.25, test.use = "roc", logfc.threshold = 0.5)
+skm.markers[order(-skm.markers$avg_log2FC),]
+#skm.markers %>% group_by(cluster) %>% top_n(n = 5, wt = avg_logFC)
+```
+
+Looks like the fifth cluster is special as it is depleted for the TTN gene which is highly expressed everywhere but in the fifth cluster. We can also color the cells on tSNE plot by the marker genes the predominantly express:
+
+```{r feature plot,fig.width=10,fig.height=8}
+#FeaturePlot(object = skm, features = c("ABCA5","TRIM63","EMC10","ATP2A1","MYH7", "MYH7B","ACTN3","MYH1","MYH2"))
+#FeaturePlot(object = skm, features = c("TTN","MT.CO1","EMC10","ATP2A1","ATP2A2","MYH7", "MYH7B","MYH1","MYH2"))
+FeaturePlot(object = skm, features = c("EMC10","ATP2A2","MYH7","MYH7B","ATP2A1","MYH1","MYH2","TTN","DCN"),min.cutoff=c(NA,NA,NA,NA,NA,NA,NA,"q1",NA))
+```
+
+We can also plot the top 20 markers (or all markers if less than 20) for each cluster:
+
+```{r,fig.width=10,fig.height=8}
+skm.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC) -> top10
+DoHeatmap(object = skm, features = top10$gene) + NoLegend()
+```
+
+The clustering is not very transparent implying that more thorough filtering is needed, alternatively, the cells look biologically very similar. We can assign final labels to clusters based on their gene markers:
+
+```{r,fig.width=10,fig.height=8}
+new.cluster.ids <- c("Chimp Fast Twitch", "Human Fast Twitch", "Human Slow Twitch", "Chimp Slow Twitch", "Unclear Cells", "Poor Quality Cells")
+names(x = new.cluster.ids) <- levels(x = skm)
+skm <- RenameIdents(object = skm, new.cluster.ids)
+DimPlot(object = skm, reduction = 'tsne', label = TRUE, pt.size=1, label.size=6) + NoLegend()
+```
+
+### Fractions of cells expressing muscle fibertype markers
+
+Now we will check proportions of cells expressing skeletal muscle slow and fast twitch gene markers. We will do it separately for humans and chimps. From the previous analysis, it seems like the difference between slow and fast twitch is more pronounced in humans compared to chimps where cells are less heterogeneous in sense of traditional fast and slow twitch gene markers like MYH2 and MYH7. Let us with selecting only the genes and cells in the original expression matrix that passed the QC and split the matrix into human and chimp expression matrices:
+
+```{r}
+qc_cells<-colnames(skm@assays$RNA@counts)
+qc_genes<-rownames(skm@assays$RNA@counts)
+expr_qc<-subset(expr,select=qc_cells)
+expr_qc<-expr_qc[match(qc_genes,rownames(expr_qc)),]
+expr_qc[1:5,1:5]
+
+expr_qc_human<-subset(expr_qc,select=colnames(expr_qc)[grepl("_human",colnames(expr_qc))])
+expr_qc_human[1:5,1:5]
+expr_qc_chimp<-subset(expr_qc,select=colnames(expr_qc)[grepl("_chimp",colnames(expr_qc))])
+expr_qc_chimp[1:5,1:5]
+```
+
+Now we are going to select only genes that are gene markers for type 1 and type 2 muscle fibers. We will select: 1) MYH1, MYH2 and ATP2A1 as gene markers for fast twitch fibers, and 2) MYH7B, MYH7 and ATP2A2 as gene markers for slow twitch fibers.
+
+```{r}
+expr_qc_human_fast<-expr_qc_human[match(c("MYH1","MYH2","ATP2A1"),rownames(expr_qc_human)),]
+expr_qc_human_fast[1:3,1:5]
+expr_qc_human_slow<-expr_qc_human[match(c("MYH7B","MYH7","ATP2A2"),rownames(expr_qc_human)),]
+expr_qc_human_slow[1:3,1:5]
+expr_qc_human_fast_slow<-expr_qc_human[match(c("MYH1","MYH2","ATP2A1","MYH7B","MYH7","ATP2A2"),rownames(expr_qc_human)),]
+expr_qc_human_fast_slow[1:6,1:6]
+
+expr_qc_chimp_fast<-expr_qc_chimp[match(c("MYH1","MYH2","ATP2A1"),rownames(expr_qc_chimp)),]
+expr_qc_chimp_fast[1:3,1:5]
+expr_qc_chimp_slow<-expr_qc_chimp[match(c("MYH7B","MYH7","ATP2A2"),rownames(expr_qc_chimp)),]
+expr_qc_chimp_slow[1:3,1:5]
+expr_qc_chimp_fast_slow<-expr_qc_chimp[match(c("MYH1","MYH2","ATP2A1","MYH7B","MYH7","ATP2A2"),rownames(expr_qc_chimp)),]
+expr_qc_chimp_fast_slow[1:6,1:6]
+```
+
+Next, we are going to check how many cells in human express both type 1 and type 2 marker genes. For this purpose, we require that the mean expression of both slow and fast twitch gene markers was higher than mean expression of all markers across all cells human, which is close to 1, i.e. something like 0.73. We need to do it in this way because there is apparently a difference in total gne expression of those slow and fast twitch gene markers between humans and chimps:
+
+```{r,fig.width=10,fig.height=8}
+boxplot(log10(as.numeric(colMeans(expr_qc_human_fast_slow))+1),log10(as.numeric(colMeans(expr_qc_chimp_fast_slow))+1),ylab="log10 expression of fast+slow twitch markers",names=c("HUMAN","CHIMP"))
+mean(as.numeric(colMeans(expr_qc_human_fast_slow)))
+mean(as.numeric(colMeans(expr_qc_chimp_fast_slow)))
+```
+
+Let us now count how many cells express both type 1 and type 2 fibers on the expression level above the average expression level:
+
+```{r}
+expr_qc_human_fast_mean<-colMeans(expr_qc_human_fast)
+expr_qc_human_fast_mean_filtered<-expr_qc_human_fast_mean[as.numeric(expr_qc_human_fast_mean)>=mean(as.numeric(colMeans(expr_qc_human_fast_slow)))]
+length(expr_qc_human_fast_mean_filtered)
+head(expr_qc_human_fast_mean_filtered)
+
+expr_qc_human_slow_mean<-colMeans(expr_qc_human_slow)
+expr_qc_human_slow_mean_filtered<-expr_qc_human_slow_mean[as.numeric(expr_qc_human_slow_mean)>=mean(as.numeric(colMeans(expr_qc_human_fast_slow)))]
+length(expr_qc_human_slow_mean_filtered)
+head(expr_qc_human_slow_mean_filtered)
+
+length(intersect(names(expr_qc_human_fast_mean_filtered),names(expr_qc_human_slow_mean_filtered)))
+head(intersect(names(expr_qc_human_fast_mean_filtered),names(expr_qc_human_slow_mean_filtered)))
+expr_qc_human_fast_slow[,match(intersect(names(expr_qc_human_fast_mean_filtered),names(expr_qc_human_slow_mean_filtered)),colnames(expr_qc_human_fast_slow))][1:6,1:6]
+```
+
+Now we will perform similar things for the chimp expression data:
+
+```{r}
+expr_qc_chimp_fast_mean<-colMeans(expr_qc_chimp_fast)
+expr_qc_chimp_fast_mean_filtered<-expr_qc_chimp_fast_mean[as.numeric(expr_qc_chimp_fast_mean)>=mean(as.numeric(colMeans(expr_qc_chimp_fast_slow)))]
+length(expr_qc_chimp_fast_mean_filtered)
+head(expr_qc_chimp_fast_mean_filtered)
+
+expr_qc_chimp_slow_mean<-colMeans(expr_qc_chimp_slow)
+expr_qc_chimp_slow_mean_filtered<-expr_qc_chimp_slow_mean[as.numeric(expr_qc_chimp_slow_mean)>=mean(as.numeric(colMeans(expr_qc_chimp_fast_slow)))]
+length(expr_qc_chimp_slow_mean_filtered)
+head(expr_qc_chimp_slow_mean_filtered)
+
+length(intersect(names(expr_qc_chimp_fast_mean_filtered),names(expr_qc_chimp_slow_mean_filtered)))
+head(intersect(names(expr_qc_chimp_fast_mean_filtered),names(expr_qc_chimp_slow_mean_filtered)))
+expr_qc_chimp_fast_slow[,match(intersect(names(expr_qc_chimp_fast_mean_filtered),names(expr_qc_chimp_slow_mean_filtered)),colnames(expr_qc_chimp_fast_slow))][1:6,1:6]
+```
+
+Next we are going to visualize the fractions of the type 1 and type 2 fibers for human. By type 1 nuclei we understand nuclei that express type 1 genes above the average level but type 2 genes below the average level. In contrast, by type 2 nuclei we understand nuclei that express type 2 genes above the average level but type 1 genes below the average level:
+
+```{r,fig.width=10,fig.height=8}
+dim(subset(expr_qc_human_fast_slow,select=colnames(expr_qc_human_fast_slow)[as.numeric(expr_qc_human_fast_mean)>= mean(as.numeric(colMeans(expr_qc_human_fast_slow)))& as.numeric(expr_qc_human_slow_mean)<mean(as.numeric(colMeans(expr_qc_human_fast_slow)))]))[2]
+dim(subset(expr_qc_human_fast_slow,select=colnames(expr_qc_human_fast_slow)[as.numeric(expr_qc_human_fast_mean)<mean(as.numeric(colMeans(expr_qc_human_fast_slow))) & as.numeric(expr_qc_human_slow_mean)>=mean(as.numeric(colMeans(expr_qc_human_fast_slow)))]))[2]
+dim(subset(expr_qc_human_fast_slow,select=colnames(expr_qc_human_fast_slow)[as.numeric(expr_qc_human_fast_mean)>=mean(as.numeric(colMeans(expr_qc_human_fast_slow))) & as.numeric(expr_qc_human_slow_mean)>=mean(as.numeric(colMeans(expr_qc_human_fast_slow)))]))[2]
+
+slices_human <- c(dim(subset(expr_qc_human_fast_slow,select=colnames(expr_qc_human_fast_slow)[as.numeric(expr_qc_human_fast_mean)>=mean(as.numeric(colMeans(expr_qc_human_fast_slow))) & as.numeric(expr_qc_human_slow_mean)<mean(as.numeric(colMeans(expr_qc_human_fast_slow)))]))[2], dim(subset(expr_qc_human_fast_slow,select=colnames(expr_qc_human_fast_slow)[as.numeric(expr_qc_human_fast_mean)<mean(as.numeric(colMeans(expr_qc_human_fast_slow))) & as.numeric(expr_qc_human_slow_mean)>=mean(as.numeric(colMeans(expr_qc_human_fast_slow)))]))[2], dim(subset(expr_qc_human_fast_slow,select=colnames(expr_qc_human_fast_slow)[as.numeric(expr_qc_human_fast_mean)>=mean(as.numeric(colMeans(expr_qc_human_fast_slow))) & as.numeric(expr_qc_human_slow_mean)>=mean(as.numeric(colMeans(expr_qc_human_fast_slow)))]))[2])
+lbls_human <- c("Fast (47%)", "Slow (47%)", "Both (6%)")
+pie(slices_human, labels = lbls_human, main="Human")
+
+
+dim(subset(expr_qc_chimp_fast_slow,select=colnames(expr_qc_chimp_fast_slow)[as.numeric(expr_qc_chimp_fast_mean)>=mean(as.numeric(colMeans(expr_qc_chimp_fast_slow))) & as.numeric(expr_qc_chimp_slow_mean)<mean(as.numeric(colMeans(expr_qc_chimp_fast_slow)))]))[2]
+dim(subset(expr_qc_chimp_fast_slow,select=colnames(expr_qc_chimp_fast_slow)[as.numeric(expr_qc_chimp_fast_mean)<mean(as.numeric(colMeans(expr_qc_chimp_fast_slow))) & as.numeric(expr_qc_chimp_slow_mean)>=mean(as.numeric(colMeans(expr_qc_chimp_fast_slow)))]))[2]
+dim(subset(expr_qc_chimp_fast_slow,select=colnames(expr_qc_chimp_fast_slow)[as.numeric(expr_qc_chimp_fast_mean)>=mean(as.numeric(colMeans(expr_qc_chimp_fast_slow))) & as.numeric(expr_qc_chimp_slow_mean)>=mean(as.numeric(colMeans(expr_qc_chimp_fast_slow)))]))[2]
+
+slices_chimp <- c(dim(subset(expr_qc_chimp_fast_slow,select=colnames(expr_qc_chimp_fast_slow)[as.numeric(expr_qc_chimp_fast_mean)>=mean(as.numeric(colMeans(expr_qc_chimp_fast_slow))) & as.numeric(expr_qc_chimp_slow_mean)<mean(as.numeric(colMeans(expr_qc_chimp_fast_slow)))]))[2], dim(subset(expr_qc_chimp_fast_slow,select=colnames(expr_qc_chimp_fast_slow)[as.numeric(expr_qc_chimp_fast_mean)<mean(as.numeric(colMeans(expr_qc_chimp_fast_slow))) & as.numeric(expr_qc_chimp_slow_mean)>=mean(as.numeric(colMeans(expr_qc_chimp_fast_slow)))]))[2], dim(subset(expr_qc_chimp_fast_slow,select=colnames(expr_qc_chimp_fast_slow)[as.numeric(expr_qc_chimp_fast_mean)>=mean(as.numeric(colMeans(expr_qc_chimp_fast_slow))) & as.numeric(expr_qc_chimp_slow_mean)>=mean(as.numeric(colMeans(expr_qc_chimp_fast_slow)))]))[2])
+lbls_chimp <- c("Fast (39%)", "Slow (49%)", "Both (12%)")
+pie(slices_chimp, labels = lbls_chimp, main="Chimp")
+```
+
+
+### Save the environment for later usage
+
+Now we will save the working environment for using it later:
+
+```{r}
+save.image(file = "snRNAseq.RData")
+```
+
+
+### Display session information
+
+```{r}
+sessionInfo()
+```
+
