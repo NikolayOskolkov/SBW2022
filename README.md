@@ -57,7 +57,8 @@ By completing this course, you will:
 |----------------|--------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------|
 | 15.00 - 17.30  | Removing technical variation: normalization and batch correction of scRNAseq data          | [Slides](https://github.com/NikolayOskolkov/SBW2022/blob/main/slides/Day2/SingleCell_PRStats_Oskolkov_session3.pdf)                                                                     |
 | 17.30 - 18.30  | Break                                                                                      |                                                                                                                |
-| 15.00 - 17.30  | Cell-type deconvolution of bulk RNA-seq using scRNAseq atlas data for training             | [Slides](https://github.com/NikolayOskolkov/SBW2022/blob/main/slides/Day2/SingleCell_PRStats_Oskolkov_session4.pdf)                                                                     |
+| 18.30 - 19.30  | Cell-type deconvolution of bulk RNA-seq using scRNAseq atlas data for training             | [Slides](https://github.com/NikolayOskolkov/SBW2022/blob/main/slides/Day2/SingleCell_PRStats_Oskolkov_session4.pdf)                                                                     |
+| 19.30 - 20.30  | Practical: predicting slow and fast twitch fibertype composition with deconvolution        | [Lab](https://html-preview.github.io/?url=https://github.com/NikolayOskolkov/SBW2022/blob/main/practicals/DeconvolutionAnalysis/Session4_Cell_type_deconvolution_PredictFiberType.html)                                                            |
 | 20.30 - 21.00  | Questions and discussion                                                                   |
 
 
