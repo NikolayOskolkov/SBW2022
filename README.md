@@ -1,13 +1,13 @@
 ![](images/logo.png)
 
-# Population Genomics and Structure Analysis
+# Single Cell RNAseq Analysis
 
 ## Instructor
 
 - Dr. Nikolay Oskolkov, Group Leader (PI) at NIRI, Riga, Latvia
 
 ## Course overview
-The study of genetic variation within and between populations using next-generation sequencing (NGS) data has become a cornerstone of modern population genomics, with wide-ranging applications in evolutionary biology, human genetics, conservation, and medical research. However, the analysis of low-coverage NGS data poses significant computational and statistical challenges, particularly when moving from raw sequencing reads to biologically meaningful inferences about population structure and demographic history. In this course, we will explore the key challenges and analytical methods in population genomics, focusing on a comprehensive understanding and practical implementation of the variant calling and population structure workflow spanning alignment, genotype likelihood-based inference with GATK and ANGSD, dimensionality reduction with PCA, tSNE and UMAP, admixture analysis, and population differentiation through Fst, F2, F3, and D-statistics of introgression.
+The study of gene expression at the resolution of individual cells using single-cell RNA sequencing (scRNA-seq) has revolutionized modern biology, with wide-ranging applications in developmental biology, immunology, cancer research, and drug discovery. However, the analysis of scRNA-seq data poses significant computational and statistical challenges, particularly when moving from raw count matrices to biologically meaningful inferences about cellular identity, state, and heterogeneity. In this course, we will explore the key challenges and analytical methods in single-cell transcriptomics, focusing on a comprehensive understanding and practical implementation of the computational workflow spanning quality control, normalization, dimensionality reduction, clustering, and multi-modal integration using the Seurat ecosystem and related tools.
 
 ## Target audience and assumed background
 We assume some basic awareness of UNIX environment, as well as at least beginner level of R and / or Python programming.
@@ -15,12 +15,12 @@ We assume some basic awareness of UNIX environment, as well as at least beginner
 ## Learning outcomes
 By completing this course, you will:
 
-- Understand the fundamentals of next-generation sequencing data and genetic variation in natural populations
-- Have an overview of bioinformatic tools and best practices for variant calling from low-coverage NGS data
-- Be able to perform alignment, genotype likelihood estimation, and variant calling with GATK and ANGSD on your own samples
-- Know the key challenges, approaches, and solutions in population structure and demographic inference
-- Be able to carry out PCA, admixture analysis, and Fst, F2, F3, and D-statistic computations to answer your specific research question
-- Be able to interpret population structure results and choose the right statistical framework for your study system 
+- Understand the fundamentals of single-cell RNA sequencing technologies and the sources of biological and technical variation in scRNA-seq data
+- Have an overview of bioinformatic tools and best practices for preprocessing, quality control, and normalization within the Seurat ecosystem
+- Be able to perform quality control, normalization, batch correction, and dimensionality reduction on your own scRNA-seq datasets
+- Know the key challenges, approaches, and solutions in cell clustering, cell type annotation, and deconvolution analysis
+- Be able to carry out PCA, tSNE, and UMAP, as well as hierarchical, partitioning, density-, and graph-based clustering to address your specific research question
+- Be able to interpret clustering and integration results and choose the right analytical framework for horizontal and vertical integration of scRNA-seq and multi-omics data 
 
 ---
 
@@ -30,9 +30,10 @@ By completing this course, you will:
 
 | Time   | Activity                                                                                           |Link                                                                                                            |
 |--------|----------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------|
-| ~ 1 h  | Recorded talk: AaRCademy workshop: aDNA data processing with Nikolay Oskolkov                      | [Video](https://www.youtube.com/watch?v=-nWoq6NTBd0&t=2121s)                                                                                           |
-| ~ 2 h  | DNAHarvester: a pipeline for analysis of highly degraded DNA from low-covarege samples             | [PDF](https://github.com/NikolayOskolkov/PopGen_PopStructure/blob/main/articles/2026.04.20.719564v2.full.pdf)                                                                                 |
-| ~ 1 h  | Useful reading: how the curse of dimensionality complicates genomics analysis                      | [Blog](https://medium.com/data-science/genomics-new-clothes-6301ab9798a7?sk=db5db53c7f968add8a4b9a82579bf56d)                                                                          |
+| ~ 1 h  | Recorded talk: lecture on dimensionality reduction of scRNAseq data with Nikolay Oskolkov          | [Video](https://www.youtube.com/watch?v=X6zQ0a0da8I)                                                                                                |
+| ~ 1 h  | Recorded talk: lecture on integration of scRNAseq data with Nikolay Oskolkov                       | [Video](https://www.youtube.com/watch?v=a-vzYSYA9mg)                                                                                                    |
+| ~ 2 h  | High-throughput muscle fiber typing from RNA sequencing data                                       | [PDF](https://github.com/NikolayOskolkov/SBW2022/blob/main/articles/13395_2022_Article_299.pdf)                                                                                   |
+| ~ 1 h  | Useful reading: deep learning applications in single cell biology and RNAseq analysis              | [Blog](https://medium.com/data-science/deep-learning-for-single-cell-biology-935d45064438?sk=f5407fc10c171898de1ed9b4d5833914)                                                                          |
 | ~ 1 h  | In case needed: Recap on basic Unix commands                                                       | [Lab](https://github.com/NikolayOskolkov/PopGen_PopStructure/blob/main/practicals/command-line-basics.md)                                                                                                    |
 
 
