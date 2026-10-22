@@ -57,7 +57,6 @@ By completing this course, you will:
 |----------------|--------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------|
 | 15.00 - 17.30  | Removing technical variation: normalization and batch correction of scRNAseq data          | [Slides](https://github.com/NikolayOskolkov/SBW2022/blob/main/slides/Day2/SingleCell_PRStats_Oskolkov_session3.pdf)                                                                     |
 | 17.30 - 18.30  | Break                                                                                      |                                                                                                                |
-
 | 20.30 - 21.00  | Questions and discussion                                                                   |
 
 
@@ -90,7 +89,7 @@ By completing this course, you will:
 
 | Time           | Activity                                                                                   |Link                                                                                                            |
 |----------------|--------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------|
-| 15.00 - 17.30  | Horizontal (MNN, Harmony, Scanorama) and vertical (MOFA, WNN) integration of scRNAseq data | [Slides](https://github.com/NikolayOskolkov/PopGen_PopStructure/blob/main/slides/Day5/Dstat.pdf)                                                                                                    |
+| 15.00 - 17.30  | Horizontal (MNN, Harmony, Scanorama) and vertical (MOFA, WNN) integration of scRNAseq data | [Slides](https://github.com/NikolayOskolkov/SBW2022/blob/main/slides/Day5/SingleCell_PRStats_Oskolkov_session9.pdf)                                                                     |
 | 17.45 - 19.00  | Methods for scRNAseq integration via Autoencoder neural networks                           | [Lab](https://html-preview.github.io/?url=https://github.com/NikolayOskolkov/Physalia_MLOmicsIntegration_2026/blob/main/practicals/DeepLearningDataIntegration.html)                                                        |
 | 17.30 - 18.30  | Break                                                                                      |                                                                                                                |
 | 18.30 - 19.30  | Practical: horizontal and vertical integration of scRNAseq data                            | [Lab](https://html-preview.github.io/?url=https://github.com/NikolayOskolkov/Physalia_MLOmicsIntegration_2026/blob/main/practicals/SingleCell_OmicsIntegration.html)                                                        |
