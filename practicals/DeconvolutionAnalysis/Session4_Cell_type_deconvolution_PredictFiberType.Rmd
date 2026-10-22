@@ -1,0 +1,210 @@
+---
+title: "Cell-type deconvolution of bulk RNA-seq: PredictFiberType"
+author: "Nikolay Oskolkov"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+    theme: readable
+subtitle: "Session 4 — practical tutorial"
+---
+
+# Overview
+
+Bulk RNA-seq measures pooled expression from many cells. When cell types have distinct transcriptional signatures, the bulk profile can be modelled as a mixture of reference profiles. This tutorial runs **PredictFiberType** to estimate the proportion of type I (slow-twitch) skeletal-muscle fibres from bulk RNA-seq and compares predictions with reference proportions supplied in the repository.
+
+The method uses a signature matrix derived from skeletal-muscle single-nucleus RNA-seq and **DeconRNASeq**. It estimates non-negative mixture proportions; it is a reference-based statistical deconvolution method rather than a conventional classification model.
+
+- PredictFiberType: <https://github.com/OlaHanssonLab/PredictFiberType>
+- Oskolkov et al. (2022): <https://doi.org/10.1186/s13395-022-00299-4>
+- Gong & Szustakowski (2013): <https://doi.org/10.1093/bioinformatics/btt090>
+
+# Set up the environment
+
+The following chunk clones the repository if needed. Git and internet access are required.
+
+```{r setup, message=FALSE}
+repo_url <- "https://github.com/OlaHanssonLab/PredictFiberType.git"
+repo_dir <- "PredictFiberType"
+if (!dir.exists(repo_dir)) {
+  status <- system2("git", c("clone", "--depth", "1", repo_url, repo_dir))
+  if (!identical(status, 0L)) stop("Git clone failed. Check internet access and Git installation.")
+}
+old_wd <- getwd()
+setwd("/home/nikolay-oskolkov/Downloads/PredictFiberType")
+```
+
+Install the required Bioconductor package if necessary.
+
+```{r packages, message=FALSE}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager", repos = "https://cloud.r-project.org")
+if (!requireNamespace("DeconRNASeq", quietly = TRUE))
+  BiocManager::install("DeconRNASeq", ask = FALSE, update = FALSE)
+library(DeconRNASeq)
+```
+
+# Inspect input data
+
+The script expects a normalized and batch-corrected expression matrix with genes in rows, samples in columns, and gene symbols as row names. The optional truth file contains measured type I fibre fractions for matching samples.
+
+```{r inspect-files}
+setwd("/home/nikolay-oskolkov/Downloads/PredictFiberType")
+required_files <- c("PredictFiberType.R", "bulk_expr.txt", "true_type1.txt", "signatures_matrix.txt")
+missing_files <- required_files[!file.exists(required_files)]
+if (length(missing_files)) stop("Missing repository file(s): ", paste(missing_files, collapse = ", "))
+file.info(required_files)[, c("size", "isdir")]
+bulk <- read.delim("bulk_expr.txt", check.names = FALSE, row.names = 1)
+dim(bulk)
+bulk[seq_len(min(5,nrow(bulk))), seq_len(min(5,ncol(bulk))), drop = FALSE]
+```
+
+# Run PredictFiberType
+
+The repository README documents this command: `Rscript PredictFiberType.R bulk_expr.txt true_type1.txt`. The script writes `deconv_prediction.txt` and a comparison plot.
+
+```{r run-method, message=FALSE}
+setwd("/home/nikolay-oskolkov/Downloads/PredictFiberType")
+run_log <- system2(file.path(R.home("bin"), "Rscript"),
+                   args = c("PredictFiberType.R", "bulk_expr.txt", "true_type1.txt"),
+                   stdout = TRUE, stderr = TRUE)
+cat(paste(run_log, collapse = "\n"))
+if (!file.exists("deconv_prediction.txt"))
+  stop("The script did not create deconv_prediction.txt; inspect the output above.")
+```
+
+# Read prediction and truth files
+
+First inspect the table structure. Repository/script versions can differ slightly in whether sample IDs are stored in a column or row names.
+
+```{r inspect-output}
+setwd("/home/nikolay-oskolkov/Downloads/PredictFiberType")
+pred_raw <- read.delim("deconv_prediction.txt", check.names = FALSE, stringsAsFactors = FALSE)
+# Read the truth file without assuming it has a header: the repository describes it as
+# a sample-indexed column, and the first field may therefore be a sample ID.
+truth_raw <- read.table("true_type1.txt", header = FALSE, sep = "", check.names = FALSE,
+                        stringsAsFactors = FALSE, fill = TRUE, comment.char = "")
+names(pred_raw); head(pred_raw)
+names(truth_raw); head(truth_raw)
+```
+
+The helper below tries to detect ID and fraction columns. If the printed column names reveal a different layout in a future repository revision, update the two column selections accordingly.
+
+```{r prepare-comparison}
+setwd("/home/nikolay-oskolkov/Downloads/PredictFiberType")
+# Predictions: identify sample ID and numeric type-I estimate.
+pred <- as.data.frame(pred_raw, check.names = FALSE)
+if (ncol(pred) < 2L) {
+  pred <- data.frame(sample_id = rownames(pred), pred, check.names = FALSE)
+} else {
+  id_candidates <- which(grepl("sample|^id$|name", names(pred), ignore.case = TRUE))
+  id_col <- if (length(id_candidates)) id_candidates[1] else 1L
+  pred$sample_id <- as.character(pred[[id_col]])
+}
+num_pred <- which(vapply(pred, is.numeric, logical(1)))
+num_pred <- setdiff(num_pred, which(names(pred) == "sample_id"))
+if (!length(num_pred)) {
+  for (nm in setdiff(names(pred), "sample_id"))
+    suppressWarnings(pred[[nm]] <- as.numeric(as.character(pred[[nm]])))
+  num_pred <- which(vapply(pred, is.numeric, logical(1)))
+}
+if (!length(num_pred)) stop("Could not identify a numeric prediction column.")
+named_pred <- num_pred[grepl("type.?1|type.?i|slow|fraction|prop", names(pred)[num_pred], ignore.case = TRUE)]
+pred_col <- if (length(named_pred)) named_pred[1] else num_pred[1]
+pred_df <- data.frame(sample_id = rownames(pred),
+                      predicted_type1 = as.numeric(pred[[2]]))
+
+# Truth file: support a two-column ID/value file or a single-column fraction file.
+truth <- as.data.frame(truth_raw, check.names = FALSE)
+if (ncol(truth) >= 2L) {
+  id_candidates <- which(grepl("sample|^id$|name", names(truth), ignore.case = TRUE))
+  id_col <- if (length(id_candidates)) id_candidates[1] else 1L
+  num_truth <- which(vapply(truth, is.numeric, logical(1)))
+  num_truth <- setdiff(num_truth, id_col)
+  if (!length(num_truth)) {
+    for (nm in setdiff(names(truth), names(truth)[id_col]))
+      suppressWarnings(truth[[nm]] <- as.numeric(as.character(truth[[nm]])))
+    num_truth <- setdiff(which(vapply(truth, is.numeric, logical(1))), id_col)
+  }
+  if (!length(num_truth)) stop("Could not identify the measured type-I fraction.")
+  named_truth <- num_truth[grepl("type.?1|type.?i|slow|fraction|prop|true", names(truth)[num_truth], ignore.case = TRUE)]
+  truth_col <- if (length(named_truth)) named_truth[1] else num_truth[1]
+  truth_df <- data.frame(sample_id = as.character(truth[[id_col]]),
+                         true_type1 = as.numeric(truth[[truth_col]]))
+} else {
+  # Preserve row names when present; if IDs are embedded in the first field, inspect the file.
+  truth_lines <- readLines("true_type1.txt", warn = FALSE)
+  truth_lines <- truth_lines[nzchar(trimws(truth_lines))]
+  parsed <- strsplit(truth_lines, "[\\t ,]+")
+  if (length(parsed) && all(lengths(parsed) >= 2L)) {
+    truth_df <- data.frame(
+      sample_id = vapply(parsed, `[`, character(1), 1),
+      true_type1 = suppressWarnings(as.numeric(vapply(parsed, `[`, character(1), 2)))
+    )
+  } else {
+    truth_df <- data.frame(sample_id = rownames(truth),
+                           true_type1 = suppressWarnings(as.numeric(truth[[1]])))
+  }
+}
+truth_df<-truth_df[-1,]
+comparison <- merge(pred_df, truth_df, by = "sample_id", all = FALSE)
+comparison <- comparison[is.finite(comparison$predicted_type1) & is.finite(comparison$true_type1), ]
+if (nrow(comparison) < 3L)
+  stop("Fewer than three matched samples found. Check sample IDs and the printed tables above.")
+head(comparison)
+```
+
+# Compare predicted and measured fractions
+
+Points close to the diagonal indicate agreement between the predicted and measured type I fractions.
+
+```{r plot-comparison, fig.width=8, fig.height=6}
+setwd("/home/nikolay-oskolkov/Downloads/PredictFiberType")
+# Convert percentages to proportions if the data are on a 0–100 scale.
+comparison$predicted_prop <- if (max(comparison$predicted_type1, na.rm=TRUE) > 1.5)
+  comparison$predicted_type1 / 100 else comparison$predicted_type1
+comparison$true_prop <- if (max(comparison$true_type1, na.rm=TRUE) > 1.5)
+  comparison$true_type1 / 100 else comparison$true_type1
+
+pearson_r <- cor(comparison$true_prop, comparison$predicted_prop, method="pearson", use="complete.obs")
+spearman_rho <- cor(comparison$true_prop, comparison$predicted_prop, method="spearman", use="complete.obs")
+mae <- mean(abs(comparison$predicted_prop - comparison$true_prop))
+rmse <- sqrt(mean((comparison$predicted_prop - comparison$true_prop)^2))
+
+plot(comparison$true_prop, comparison$predicted_prop,
+     xlim=c(0.2,0.65), ylim=c(0.2,0.6),
+     xlab="Measured type I (slow-twitch) fraction",
+     ylab="Predicted type I (slow-twitch) fraction",
+     main="PredictFiberType: prediction vs ground truth",
+     pch=19, col="#247BA0", cex=1.1)
+abline(0,1,lty=2,lwd=2,col="grey45")
+legend("topleft", bty="n", legend=c(
+  sprintf("Pearson r = %.2f", pearson_r),
+  sprintf("Spearman rho = %.2f", spearman_rho),
+  sprintf("MAE = %.3f", mae),
+  sprintf("RMSE = %.3f", rmse)))
+```
+
+```{r metrics}
+data.frame(n_matched_samples=nrow(comparison), pearson_r=pearson_r,
+           spearman_rho=spearman_rho, MAE=mae, RMSE=rmse)
+```
+
+# Interpretation
+
+- A positive correlation indicates that samples with higher measured type I fractions tend to receive higher predicted fractions.
+- Correlation does not establish calibration: predictions can correlate with truth while systematically over- or under-estimating the fraction.
+- If type I and type II are exhaustive classes, type II (fast-twitch) fraction is approximately `1 - predicted_type1`. Use this complement only when the two-class interpretation is appropriate.
+- Accuracy depends on reference quality, similarity between reference and bulk samples, normalization, gene identifiers, and independent ground-truth measurements.
+
+# References
+
+1. Gong T, Szustakowski JD. DeconRNASeq: a statistical framework for deconvolution of heterogeneous tissue samples based on mRNA-Seq data. *Bioinformatics*. 2013;29(8):1083–1085. <https://doi.org/10.1093/bioinformatics/btt090>
+2. Oskolkov N, et al. High-throughput muscle fiber typing from RNA sequencing data. *Skeletal Muscle*. 2022. <https://doi.org/10.1186/s13395-022-00299-4>
+3. PredictFiberType source code and example data: <https://github.com/OlaHanssonLab/PredictFiberType>
+
+```{r cleanup, include=FALSE}
+setwd(old_wd)
+```
