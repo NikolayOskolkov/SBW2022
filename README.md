@@ -1,6 +1,6 @@
 ![](images/logo.png)
 
-# Single Cell RNAseq Data Analysis
+# Single Cell RNA Sequencing (scRNAseq) Data Analysis
 
 ## Instructor
 
