@@ -1,0 +1,437 @@
+---
+title: "Comparing scRNAseq Normalization Methods"
+author: "Nikolay Oskolkov"
+date: "September 26, 2017"
+output:
+  html_document:
+    toc: yes
+abstract: |
+  In this lab we will go through main bulk and single cell RNAseq normalization methods and make their comprehensive comparison.
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir="/home/nikolay/Documents/Teaching/scRNAseq_course/")
+```
+
+### Load packages
+
+First of all we will load *scran* and *scater* R packages which we are going to use in this lab:
+
+```{r}
+suppressMessages(require(scran))
+suppressMessages(require(scater))
+suppressMessages(require(edgeR))
+suppressMessages(require(matrixStats))
+suppressMessages(require(mixOmics))
+suppressMessages(require(RColorBrewer))
+suppressMessages(require(Rtsne))
+suppressMessages(require(limSolve))
+suppressMessages(require(DESeq))
+suppressMessages(require(tweeDEseq))
+```
+
+### Load Expression Values and Metadata
+
+Let start with loading the matrix of raw gene expression counts and filtering away genes with mean rpkm count across all cells below 1. Those genes are lowly expressed genes which should be excluded from the downstream analysis as they might lead to spurious results:
+
+```{r loading expression data}
+D <- read.table("data/ILC/ensembl_countvalues_ILC.csv",sep=",",header=T,row.names=1)
+rpkm <- read.table("data/ILC/ensembl_rpkmvalues_ILC.csv",sep=",",header=T,row.names=1)
+D<-D[rowMeans(rpkm)>=1,]
+rpkm<-rpkm[rowMeans(rpkm)>=1,]
+D[1:5,1:5]
+dim(D)
+```
+
+The rows of the matrix represent Ensembl gene IDs (you can convert them to gene symbols using biomaRt package) from `r dim(D)[1]` genes, and the columns are IDs from `r dim(D)[2]` cells from different individuals sequenced at different plates. To see how many individuals and plates we have let us load the meta-information and have a look:
+
+```{r}
+M <- read.table("data/ILC/Metadata_ILC.csv",sep=",",header=T,row.names=1)
+M$Plate<-matrix(unlist(strsplit(as.character(M$Plate),"_")),byrow=TRUE,ncol=2)[,2]
+head(M)
+```
+
+Thus we have cells from `r length(levels(factor(M$Donor)))` individuals with IDs:
+
+```{r}
+levels(factor(M$Donor))
+```
+
+that were pooled together and sequenced at `r length(levels(factor(M$Plate)))` plates with IDs:
+
+```{r}
+levels(factor(M$Plate))
+```
+
+and finally we have `r length(levels(factor(M$Celltype)))` cell-types with the following IDs:
+
+```{r}
+levels(factor(M$Celltype))
+```
+
+We will color cells on the PCA, MDS and tSNE plots by their cell type, donor they came from and plate they were sequenced on, therfore let us add a column of individual colors for each cell type:
+
+```{r}
+Celltype_Colors<-data.frame(Celltype=levels(factor(M$Celltype)),Color=brewer.pal(length(levels(factor(M$Celltype))),'Dark2'))
+M$Celltype_Color<-as.character(Celltype_Colors$Color[match(M$Celltype,Celltype_Colors$Celltype)])
+Donor_Colors<-data.frame(Donor=levels(factor(M$Donor)),Color=brewer.pal(length(levels(factor(M$Donor))),'Dark2'))
+M$Donor_Color<-as.character(Donor_Colors$Color[match(M$Donor,Donor_Colors$Donor)])
+Plate_Colors<-data.frame(Plate=levels(factor(M$Plate)),Color=brewer.pal(length(levels(factor(M$Plate))),'Dark2'))
+M$Plate_Color<-as.character(Plate_Colors$Color[match(M$Plate,Plate_Colors$Plate)])
+head(M)
+#palette(brewer.pal(length(levels(factor(M$Celltype))),'Dark2'))
+```
+
+Finally, before we start comparing different normalization strategies, let us check how many spikes and how many endogenous genes we have after we have filtered the unnormalized and data set:
+
+```{r}
+print(paste0("There are ",sum(grepl("ERCC_",rownames(D))==TRUE)," spikes in the scRNAseq data set after filtering"))
+D_ERCC<-D[grepl("ERCC_",rownames(D)),]
+D_ERCC[1:5,1:5]
+print(paste0("There are ",sum(grepl("ERCC_",rownames(D))==FALSE)," endogenous genes in the scRNAseq data set after filtering"))
+```
+
+This filtered unnormalized data set we will use later for applying different normalization methods. Note that RPKM normalized data set contains exactly the same genes since we used mean RPKM count above or equalt to 1 as criterion for filtering.
+
+
+### Defining Visualization Function
+
+Since we are going to repeat the same visualization commands for data sets normalized by different methods, we will define here a function which takes a data set (normalized or unnormalized) and a short description of normalization methods and produces a bunch of informatice plots. There is no need to go through the code of the function, it is not difficult but bulky.
+
+```{r}
+#Here df is a matrix with samples as columns and features as rows
+#description is supposed to say something about normalization, i.e. "RAW", "RPKM", "DECONVOLUTION"
+norm_function<-function(df,description)
+{
+df_ERCC<-df[grepl("ERCC_",rownames(df)),]
+mean_expr<-as.numeric(rowMeans(df,na.rm=TRUE))
+sd_expr<-rowSds(as.matrix(df),na.rm=TRUE)
+cv_squared_expr<-(sd_expr/mean_expr)^2
+par(mfrow=c(1,1))
+plot(log10(cv_squared_expr)~log10(mean_expr),pch=20,cex=0.5,xlab=paste0("log10 ( MEAN ",description," COUNT )"),ylab="log10 ( CV² )",main=paste0(description," COUNTS"))
+
+mean_expr_ercc<-as.numeric(rowMeans(df_ERCC,na.rm=TRUE))
+sd_expr_ercc<-rowSds(as.matrix(df_ERCC),na.rm=TRUE)
+cv_squared_expr_ercc<-(sd_expr_ercc/mean_expr_ercc)^2
+mean_expr_ercc_filtered<-mean_expr_ercc
+cv_squared_expr_ercc_filtered<-cv_squared_expr_ercc
+#mean_expr_ercc_filtered<-mean_expr_ercc[!(log10(mean_expr_ercc)<1 & log10(cv_squared_expr_ercc)<1)]
+#cv_squared_expr_ercc_filtered<-cv_squared_expr_ercc[!(log10(mean_expr_ercc)<1 & log10(cv_squared_expr_ercc)<1)]
+points(log10(cv_squared_expr_ercc_filtered)~log10(mean_expr_ercc_filtered),col="red",pch=20,cex=1.5)
+
+#FIT SPIKEINS WITH A CURVE
+fit_expr_ercc<-loess(log10(cv_squared_expr_ercc_filtered)[is.finite(log10(mean_expr_ercc_filtered))]~log10(mean_expr_ercc_filtered)[is.finite(log10(mean_expr_ercc_filtered))],span=1)
+j<-order(log10(mean_expr_ercc_filtered)[is.finite(log10(mean_expr_ercc_filtered))])
+lines(fit_expr_ercc$fitted[j]~log10(mean_expr_ercc_filtered)[is.finite(log10(mean_expr_ercc_filtered))][j],col="red",lwd=3)
+pred_expr<-predict(fit_expr_ercc,log10(mean_expr))
+
+#DETERMINE VARIABLE GENES THAT ARE ABOVE THE SPIKEINS CURVE
+filtered_expr<-df[log10(cv_squared_expr)>=pred_expr,]
+filtered_expr<-filtered_expr[grepl("NA",rownames(filtered_expr))==FALSE,]
+text(3,2.5,paste0(dim(filtered_expr)[1]," variable genes"))
+
+#PCA PLOT WITH MIX_OMICS
+pca.ALL<-pca(log10(t(filtered_expr+1)),ncomp=10,center=TRUE,scale=FALSE)
+plot(pca.ALL)
+plotIndiv(pca.ALL,group=factor(M$Celltype),ind.names=FALSE,ellipse=FALSE,legend=TRUE,title=paste0("PCA PLOT WITH MIX_OMICS: ",description," COUNTS"),cex=1)
+
+par(mfrow=c(2,2))
+#MDS PLOT WITH PLOT_MDS
+library("edgeR")
+cds_expr<-DGEList(filtered_expr)
+plotMDS(cds_expr,pch=1,main=paste0("MDS PLOT WITH PLOT_MDS: ",description," COUNTS"),col=M$Celltype_Color,top=dim(filtered_expr)[1])
+mtext("plotMDS did transposing, adding offset and log-transforming")
+legend("topleft",levels(M$Celltype),cex=1,fill=levels(factor(M$Celltype_Color)),inset=0.02)
+
+library("edgeR")
+plotMDS(log10(filtered_expr+1),pch=1,main=paste0("MDS PLOT WITH PLOT_MDS: ",description," COUNTS"),col=M$Celltype_Color,top=dim(filtered_expr)[1])
+mtext("Manual transposing, adding offset and log-transforming")
+legend("topleft",levels(M$Celltype),cex=1,fill=levels(factor(M$Celltype_Color)),inset=0.02)
+
+#MDS PLOT WITH CMDSCALE
+d<-dist(log10(t(filtered_expr+1)))
+mds<-cmdscale(d,k=2)
+plot(mds[,1],mds[,2],main=paste0("MDS PLOT WITH CMDSCALE: ",description," COUNTS"),col=M$Celltype_Color)
+mtext("We manually constracted the matrix of distances")
+legend("topleft",levels(M$Celltype),cex=1,fill=levels(factor(M$Celltype_Color)),inset=0.02)
+
+#PCA PLOT WITH PRCOMP
+PC<-prcomp(log10(t(filtered_expr+1)),center=TRUE,scale=FALSE)
+plot(PC$x[,1:2],col=M$Celltype_Color,main=paste0("PCA PLOT WITH PRCOMP: ",description," COUNTS"))
+mtext("Manual transposing, adding offset and log-transforming")
+legend("topleft",levels(M$Celltype),cex=1,fill=levels(factor(M$Celltype_Color)),inset=0.02)
+
+#TSNE PLOT
+library("Rtsne")
+set.seed(1)
+tsne.out_expr<-Rtsne(t(log10(filtered_expr+1)),initial_dims=20,verbose=TRUE,perplexity=30)
+par(mfrow=c(1,1))
+plot(tsne.out_expr$Y,main=paste0("tSNE: ",description," COUNTS"),col=M$Celltype_Color,xlab="tSNE1",ylab="tSNE2")
+legend("topright",levels(M$Celltype),cex=1,fill=levels(factor(M$Celltype_Color)),inset=0.02)
+plot(tsne.out_expr$Y,main=paste0("tSNE: ",description," COUNTS"),col=M$Donor_Color,xlab="tSNE1",ylab="tSNE2")
+legend("topright",levels(M$Donor),cex=1,fill=levels(factor(M$Donor_Color)),inset=0.02)
+plot(tsne.out_expr$Y,main=paste0("tSNE: ",description," COUNTS"),col=M$Plate_Color,xlab="tSNE1",ylab="tSNE2")
+legend("topright",levels(factor(M$Plate)),cex=1,fill=levels(factor(M$Plate_Color)),inset=0.02)
+}
+
+cv2_vs_mean_function<-function(df,description,layout)
+{
+if(layout==2){par(mfrow=c(layout,layout))}
+df_ERCC<-df[grepl("ERCC_",rownames(df)),]
+mean_expr<-as.numeric(rowMeans(df,na.rm=TRUE))
+sd_expr<-rowSds(as.matrix(df),na.rm=TRUE)
+cv_squared_expr<-(sd_expr/mean_expr)^2
+plot(log10(cv_squared_expr)~log10(mean_expr),pch=20,cex=0.5,xlab=paste0("log10 ( MEAN ",description," COUNT )"),ylab="log10 ( CV² )",main=paste0(description," COUNTS"))
+
+mean_expr_ercc<-as.numeric(rowMeans(df_ERCC,na.rm=TRUE))
+sd_expr_ercc<-rowSds(as.matrix(df_ERCC),na.rm=TRUE)
+cv_squared_expr_ercc<-(sd_expr_ercc/mean_expr_ercc)^2
+mean_expr_ercc_filtered<-mean_expr_ercc
+cv_squared_expr_ercc_filtered<-cv_squared_expr_ercc
+#mean_expr_ercc_filtered<-mean_expr_ercc[!(log10(mean_expr_ercc)<1 & log10(cv_squared_expr_ercc)<1)]
+#cv_squared_expr_ercc_filtered<-cv_squared_expr_ercc[!(log10(mean_expr_ercc)<1 & log10(cv_squared_expr_ercc)<1)]
+points(log10(cv_squared_expr_ercc_filtered)~log10(mean_expr_ercc_filtered),col="red",pch=20,cex=1.5)
+
+#FIT SPIKEINS WITH A CURVE
+fit_expr_ercc<-loess(log10(cv_squared_expr_ercc_filtered)[is.finite(log10(mean_expr_ercc_filtered))]~log10(mean_expr_ercc_filtered)[is.finite(log10(mean_expr_ercc_filtered))],span=1)
+j<-order(log10(mean_expr_ercc_filtered)[is.finite(log10(mean_expr_ercc_filtered))])
+lines(fit_expr_ercc$fitted[j]~log10(mean_expr_ercc_filtered)[is.finite(log10(mean_expr_ercc_filtered))][j],col="red",lwd=3)
+pred_expr<-predict(fit_expr_ercc,log10(mean_expr))
+
+#DETERMINE VARIABLE GENES THAT ARE ABOVE THE SPIKEINS CURVE
+filtered_expr<-df[log10(cv_squared_expr)>=pred_expr,]
+filtered_expr<-filtered_expr[grepl("NA",rownames(filtered_expr))==FALSE,]
+text(3,2.5,paste0(dim(filtered_expr)[1]," variable genes"))
+}
+
+pca_function<-function(df,description,layout)
+{
+if(layout==2){par(mfrow=c(layout,layout))}
+df_ERCC<-df[grepl("ERCC_",rownames(df)),]
+mean_expr<-as.numeric(rowMeans(df,na.rm=TRUE))
+sd_expr<-rowSds(as.matrix(df),na.rm=TRUE)
+cv_squared_expr<-(sd_expr/mean_expr)^2
+
+mean_expr_ercc<-as.numeric(rowMeans(df_ERCC,na.rm=TRUE))
+sd_expr_ercc<-rowSds(as.matrix(df_ERCC),na.rm=TRUE)
+cv_squared_expr_ercc<-(sd_expr_ercc/mean_expr_ercc)^2
+mean_expr_ercc_filtered<-mean_expr_ercc
+cv_squared_expr_ercc_filtered<-cv_squared_expr_ercc
+
+#FIT SPIKEINS WITH A CURVE
+fit_expr_ercc<-loess(log10(cv_squared_expr_ercc_filtered)[is.finite(log10(mean_expr_ercc_filtered))]~log10(mean_expr_ercc_filtered)[is.finite(log10(mean_expr_ercc_filtered))],span=1)
+j<-order(log10(mean_expr_ercc_filtered)[is.finite(log10(mean_expr_ercc_filtered))])
+pred_expr<-predict(fit_expr_ercc,log10(mean_expr))
+
+#DETERMINE VARIABLE GENES THAT ARE ABOVE THE SPIKEINS CURVE
+filtered_expr<-df[log10(cv_squared_expr)>=pred_expr,]
+filtered_expr<-filtered_expr[grepl("NA",rownames(filtered_expr))==FALSE,]
+
+#PCA PLOT WITH PRCOMP
+PC<-prcomp(log10(t(filtered_expr+1)),center=TRUE,scale=FALSE)
+plot(PC$x[,1:2],col=M$Celltype_Color,main=paste0("PCA PLOT: ",description," COUNTS"))
+legend("topleft",levels(M$Celltype),cex=1,fill=levels(factor(M$Celltype_Color)),inset=0.02)
+}
+
+
+tsne_function<-function(df,description,layout)
+{
+if(layout==2){par(mfrow=c(layout,layout))}
+df_ERCC<-df[grepl("ERCC_",rownames(df)),]
+mean_expr<-as.numeric(rowMeans(df,na.rm=TRUE))
+sd_expr<-rowSds(as.matrix(df),na.rm=TRUE)
+cv_squared_expr<-(sd_expr/mean_expr)^2
+
+mean_expr_ercc<-as.numeric(rowMeans(df_ERCC,na.rm=TRUE))
+sd_expr_ercc<-rowSds(as.matrix(df_ERCC),na.rm=TRUE)
+cv_squared_expr_ercc<-(sd_expr_ercc/mean_expr_ercc)^2
+mean_expr_ercc_filtered<-mean_expr_ercc
+cv_squared_expr_ercc_filtered<-cv_squared_expr_ercc
+
+#FIT SPIKEINS WITH A CURVE
+fit_expr_ercc<-loess(log10(cv_squared_expr_ercc_filtered)[is.finite(log10(mean_expr_ercc_filtered))]~log10(mean_expr_ercc_filtered)[is.finite(log10(mean_expr_ercc_filtered))],span=1)
+j<-order(log10(mean_expr_ercc_filtered)[is.finite(log10(mean_expr_ercc_filtered))])
+pred_expr<-predict(fit_expr_ercc,log10(mean_expr))
+
+#DETERMINE VARIABLE GENES THAT ARE ABOVE THE SPIKEINS CURVE
+filtered_expr<-df[log10(cv_squared_expr)>=pred_expr,]
+filtered_expr<-filtered_expr[grepl("NA",rownames(filtered_expr))==FALSE,]
+
+#TSNE PLOT
+library("Rtsne")
+set.seed(1)
+tsne.out_expr<-Rtsne(t(log10(filtered_expr+1)),initial_dims=20,verbose=TRUE,perplexity=30)
+plot(tsne.out_expr$Y,main=paste0("tSNE: ",description," COUNTS"),col=M$Celltype_Color,xlab="tSNE1",ylab="tSNE2")
+legend("topright",levels(M$Celltype),cex=1,fill=levels(factor(M$Celltype_Color)),inset=0.02)
+}
+```
+
+
+
+### Raw (Unnormalized) Counts
+
+Let us produce normalization plots for raw (unnormalized) counts:
+
+```{r produce raw counts plots,fig.width=10,fig.height=8}
+norm_function(D,"RAW")
+```
+
+
+### RPKM Normalized Counts
+
+Let us produce normalization plots for RPKM normalized counts:
+
+```{r produce rpkm counts plots,fig.width=10,fig.height=8}
+norm_function(rpkm,"RPKM")
+```
+
+
+### Deconvolution Normalization
+
+Further, we will create a *scran* object to be used in the lab:
+
+```{r deconvolution,fig.width=10,fig.height=8}
+#out.facs_deconv<-computeSumFactors(as.matrix(D),positive=TRUE)
+sce_deconv<-newSCESet(countData=data.frame(D))
+sce_deconv<-calculateQCMetrics(sce_deconv,feature_controls=list(MySpikes=rep(c(FALSE,TRUE),c(dim(D)[1]-dim(D_ERCC)[1],dim(D_ERCC)[1]))))
+setSpike(sce_deconv) <- "MySpikes"
+spikes(sce_deconv)[1:5,1:5] #extracts matrix of spikes
+clusters <- quickCluster(sce_deconv,get.spikes=FALSE,min.size=199)
+sce_deconv <- computeSumFactors(sce_deconv,cluster=clusters)
+summary(sizeFactors(sce_deconv))
+sce_deconv <- computeSpikeFactors(sce_deconv, general.use=FALSE)
+summary(sizeFactors(sce_deconv))
+head(sce_deconv@phenoData@data$size_factor)
+head(sce_deconv@phenoData@data$size_factor_MySpikes)
+par(mfrow=c(1,2))
+hist(sce_deconv@phenoData@data$size_factor,xlab="Endogenous genes deconvolution size factors",main="")
+hist(sce_deconv@phenoData@data$size_factor_MySpikes,xlab="Spikes library size factors",main="")
+
+sce_deconv<-normalize(sce_deconv)
+
+expr_deconv<-as.data.frame(t(apply(D[grepl("ERCC_",rownames(D))==FALSE,],1,"/",sce_deconv@phenoData@data$size_factor)))
+expr_deconv_ercc<-as.data.frame(t(apply(D_ERCC,1,"/",sce_deconv@phenoData@data$size_factor_MySpikes)))
+expr_deconv_merge<-rbind(expr_deconv,expr_deconv_ercc)
+
+#Detecting highly variable genes
+batch <- M$Donor
+design <- model.matrix(~batch)
+alt.fit <- trendVar(sce_deconv, design=design)
+alt.decomp <- decomposeVar(sce_deconv, alt.fit)
+top.hvgs <- order(alt.decomp$bio, decreasing=TRUE)
+head(alt.decomp[top.hvgs,])
+par(mfrow=c(1,1))
+barplot(as.numeric(alt.decomp[top.hvgs,]$bio)[1:7],names.arg=rownames(alt.decomp[top.hvgs,])[1:7],las=1,ylim=c(0,10),main="Highly Variable Genes",cex.names=0.7,col="brown",ylab="BIOLOGICAL VARIATION")
+
+plot(alt.decomp$mean, alt.decomp$total, xlab="Mean log-expression", ylab="Variance")
+o <- order(alt.decomp$mean)
+lines(alt.decomp$mean[o], alt.decomp$tech[o], col="red", lwd=2)
+points(alt.fit$mean, alt.fit$var, col="red", pch=16)
+
+#Detecting correlated genes
+null.dist <- correlateNull(design=design)
+cor.pairs <- correlatePairs(sce_deconv[top.hvgs[1:200],], null.dist=null.dist, design=design)
+head(cor.pairs)
+barplot(abs(as.numeric(cor.pairs$rho))[1:5],names.arg=paste(cor.pairs$gene1[1:5],cor.pairs$gene2[1:5],sep="_"),las=1,main="Correlated Gene Pairs",cex.names=0.6,col="brown",ylab="SPEARMAN RHO")
+```
+
+Let us produce normalization plots for RPKM normalized counts:
+
+```{r produce deconvolution counts plots,fig.width=10,fig.height=8}
+norm_function(expr_deconv_merge,"DECONVOLUTION")
+```
+
+### Spike Library Size Normalization
+
+Now let us normalize both endogenous genes and spikes by spikes library sizes:
+
+```{r spike library size,fig.width=10,fig.height=8}
+sce_spike<-newSCESet(countData=data.frame(D))
+sce_spike<-calculateQCMetrics(sce_spike,feature_controls=list(MySpikes=rep(c(FALSE,TRUE),c(dim(D)[1]-dim(D_ERCC)[1],dim(D_ERCC)[1]))))
+setSpike(sce_spike) <- "MySpikes"
+spikes(sce_spike)[1:5,1:5] #extracts matrix of spikes
+
+sce_spike <- computeSpikeFactors(sce_spike,general.use=TRUE)
+summary(sizeFactors(sce_spike))
+head(sce_spike@phenoData@data$size_factor)
+head(sce_spike@phenoData@data$size_factor_MySpikes)
+
+expr_spike<-as.data.frame(t(apply(D,1,"/",sce_spike@phenoData@data$size_factor)))
+```
+
+Let us produce normalization plots for counts normalized by spike library sizes:
+
+```{r produce spike library size counts plots,fig.width=10,fig.height=8}
+norm_function(expr_spike,"SPIKE LIB SIZE")
+```
+
+### Comparing Normalization Methods
+
+Finally, let us put all main plots for different normalization stratageies together:
+
+```{r compare normalizations,fig.width=10,fig.height=8}
+cv2_vs_mean_function(D,"RAW",2)
+cv2_vs_mean_function(rpkm,"RPKM",1)
+cv2_vs_mean_function(expr_deconv_merge,"DECONVOLUTION",1)
+cv2_vs_mean_function(expr_spike,"SPIKE LIB SIZE",1)
+pca_function(D,"RAW",2)
+pca_function(rpkm,"RPKM",1)
+pca_function(expr_deconv_merge,"DECONVOLUTION",1)
+pca_function(expr_spike,"SPIKE LIB SIZE",1)
+tsne_function(D,"RAW",2)
+tsne_function(rpkm,"RPKM",1)
+tsne_function(expr_deconv_merge,"DECONVOLUTION",1)
+tsne_function(expr_spike,"SPIKE LIB SIZE",1)
+```
+
+Last thing we will do we will compare Deconvolution size factors to TMM, DEseq and Library Size:
+
+```{r compare size factors,fig.width=10,fig.height=8}
+#DECONVOLUTION NORMALIZATION
+out.facs<-computeSumFactors(as.matrix(D),positive=TRUE)
+
+#DESEQ NORMALIZATION
+cds_DESeq<-newCountDataSet(D,condition=rep(1,dim(D)[2]))
+cds_DESeq<-estimateSizeFactors(cds_DESeq)
+head(sizeFactors(cds_DESeq))
+head(estimateSizeFactorsForMatrix(D))
+D[1:6,1:6]
+counts(cds_DESeq,normalized=FALSE)[1:6,1:6]
+counts(cds_DESeq,normalized=TRUE)[1:6,1:6]
+t(apply(D,1,"/",sizeFactors(cds_DESeq)))[1:6,1:6]
+t(t(counts(cds_DESeq))/sizeFactors(cds_DESeq))[1:6,1:6]
+
+#TMM NORMALIZATION
+cds_TMM<-DGEList(D)
+cds_TMM<-calcNormFactors(cds_TMM)
+cds_TMM<-estimateCommonDisp(cds_TMM)
+cds_TMM<-estimateTagwiseDisp(cds_TMM)
+D[1:6,1:6]
+round(equalizeLibSizes(cds_TMM)$pseudo.counts)[1:6,1:6]
+cpm(cds_TMM,normalized.lib.sizes=TRUE,log=FALSE)[1:6,1:6]
+(t(apply(D,1,"/",as.numeric(cds_TMM$samples$norm.factors)*as.numeric(cds_TMM$samples$lib.size)))*1e6)[1:6,1:6]
+cds_TMM$counts<-normalizeCounts(cds_TMM$counts)
+cds_TMM$counts[1:6,1:6]
+
+
+par(mfrow=c(2,2))
+plot(log10(sizeFactors(cds_DESeq))~log10(cds_TMM$samples$norm.factors*cds_TMM$samples$lib.size),xlab="TMM",ylab="DESEQ")
+
+
+#CENTER SIZE FACTORS AROUND MEDIAN AND PLOT SIZE FACTORS
+med_out.facs<-as.numeric(out.facs)/median(as.numeric(out.facs))
+med_sizeFactors_DESeq<-as.numeric(sizeFactors(cds_DESeq))/median(as.numeric(sizeFactors(cds_DESeq)))
+med_sizeFactors_TMM<-as.numeric(as.numeric(cds_TMM$samples$norm.factors)*as.numeric(cds_TMM$samples$lib.size))/median(as.numeric(as.numeric(cds_TMM$samples$norm.factors)*as.numeric(cds_TMM$samples$lib.size)))
+med_sizeFactors_RPKM<-as.numeric(cds_TMM$samples$lib.size)/median(as.numeric(cds_TMM$samples$lib.size))
+
+plot(log10(med_out.facs)~log10(med_sizeFactors_DESeq),xlim=c(-1,1),ylim=c(-1,1),xlab="DESEQ",ylab="DECONVOLUTION")
+abline(a=0,b=1,col="red")
+
+plot(log10(med_out.facs)~log10(med_sizeFactors_TMM),xlim=c(-1,1),ylim=c(-1,1),xlab="TMM",ylab="DECONVOLUTION")
+abline(a=0,b=1,col="red")
+
+plot(log10(med_out.facs)~log10(med_sizeFactors_RPKM),xlim=c(-1,1),ylim=c(-1,1),xlab="RPKM",ylab="DECONVOLUTION")
+abline(a=0,b=1,col="red")
+```
+
