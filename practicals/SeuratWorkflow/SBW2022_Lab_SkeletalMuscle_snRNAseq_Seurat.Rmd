@@ -124,7 +124,7 @@ The number of features and UMIs (nFeature_RNA and nCount_RNA) are automatically 
 mito.features <- grep(pattern = "^MT\\.", x = rownames(x = skm), value = TRUE)
 
 # Calculate % of mitochondrial genes per cell
-percent.mito <- Matrix::colSums(x = GetAssayData(object = skm, slot = 'counts')[mito.features, ]) / Matrix::colSums(x = GetAssayData(object = skm, slot = 'counts'))
+percent.mito <- Matrix::colSums(x = GetAssayData(object = skm, layer = 'counts')[mito.features, ]) / Matrix::colSums(x = GetAssayData(object = skm, layer = 'counts'))
 
 # The [[ operator can add columns to object metadata, and is a great place to stash QC stats
 skm[['percent.mito']] <- percent.mito
@@ -148,6 +148,10 @@ skm <- NormalizeData(object = skm, normalization.method = "LogNormalize", scale.
 #skm <- PercentageFeatureSet(skm, pattern = "^MT-", col.name = "percent.mt")
 # run sctransform
 #skm <- SCTransform(skm, vars.to.regress = "percent.mt", verbose = TRUE)
+
+# compare raw counsts vs SCT-normalized counts
+#as.data.frame(skm[["SCT"]]$scale.data[1:5,1:5])
+#as.data.frame(skm[["RNA"]]$counts[rownames(as.data.frame(skm[["SCT"]]$scale.data[1:5,1:5])),1:5])
 ```
 
 Now we will identify Highly Variable Genes (HVGs) wich will be used for dimensionality reduction. FindVariableFeatures calculates the average expression and dispersion for each feature, places these features into bins, and then calculates a z-score for dispersion within each bin. This helps control for the relationship between variability and average expression.
