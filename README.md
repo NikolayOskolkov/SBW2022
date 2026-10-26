@@ -73,6 +73,7 @@ By completing this course, you will:
 | 17.30 - 18.30  | Break                                                                                      |                                                                                                                |
 | 18.30 - 19.30  | Practical: coding PCA and Multi-Dimensional Scaling (MDS) from scratch                     | [Lab](https://html-preview.github.io/?url=https://github.com/NikolayOskolkov/PopGen_PopStructure/blob/main/practicals/Day2/pca_mds_toy_example.html)                                                                     |
 | 18.30 - 20.30  | Practical: practicing PCA, MDS, tSNE and UMAP                                              | [Lab](https://html-preview.github.io/?url=https://github.com/NikolayOskolkov/PopGen_PopStructure/blob/main/practicals/Day2/Dimension_Reduction_tutorial.html)                                                            |
+| 19.00 - 20.30  | Practical: dimensionality reduction of scRNAseq data via Seurat workflow                   | [Lab](https://html-preview.github.io/?url=https://github.com/NikolayOskolkov/SBW2022/blob/main/practicals/SeuratWorkflow/SBW2022_Lab_SkeletalMuscle_snRNAseq_Seurat.html)                                               |
 | 20.30 - 21.00  | Questions and discussion                                                                   |
 
 
@@ -85,6 +86,7 @@ By completing this course, you will:
 | 17.30 - 18.30  | Break                                                                                      |                                                                                                                |
 | 18.30 - 20.30  | Practical: practicing hierarchical, partitioning and density-based clustering              | [Lab](https://html-preview.github.io/?url=https://github.com/NikolayOskolkov/PopGen_PopStructure/blob/main/practicals/Day3/Clustering_Lab.html)                                                                          |
 | 19.30 - 20.30  | Practical: practicing Gaussian Mixture Model (GMM), coding GMM from scratch in Python      | [Lab](https://html-preview.github.io/?url=https://github.com/NikolayOskolkov/PopGen_PopStructure/blob/main/practicals/Day3/GMM_FromScratch.html)                                                                         |
+| 19.00 - 20.30  | Practical: Louvain clustering of scRNAseq data via Seurat workflow                         | [Lab](https://html-preview.github.io/?url=https://github.com/NikolayOskolkov/SBW2022/blob/main/practicals/SeuratWorkflow/SBW2022_Lab_SkeletalMuscle_snRNAseq_Seurat.html)                                               |
 | 20.30 - 21.00  | Questions and discussion                                                                   |
 
 
