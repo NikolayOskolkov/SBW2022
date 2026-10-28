@@ -1,0 +1,479 @@
+---
+title: "Analysis of snRNAseq Data from Human and Chimp Skeletal Muscle Cells"
+author: "Nikolay Oskolkov, NBIS SciLifeLab, nikolay.oskolkov@scilifelab.se"
+date: "April 29, 2019"
+output:
+  html_document:
+    toc: yes
+  pdf_document:
+    toc: yes
+subtitle: PIs of the project are Ola Hansson, Lund University, and Svante Pääbo, Max-Planck Institute Leipzig
+abstract: |
+  In this document we will apply Seurat pipeline to 10X snRNAseq data from human and chimp skeletal muscles cells. More specifically, we will check whether we find clustering with respect to skeletal muscle type 1 and type 2A / 2X fibrotypes. This analysis was published in Skeletal Muscle in 2022, https://skeletalmusclejournal.biomedcentral.com/articles/10.1186/s13395-022-00299-4, if you use the data for your research, we kindly ask you to cite the study.
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir="/home/nikolay-oskolkov/Documents/Consultancy/PRStats/Single_Cell_Data_Analysis/Practicals/DEseq2_DGE_GSEA")
+```
+
+### Reading and Filtering Data
+
+Let us start with loading packages:
+
+```{r}
+library("Seurat")
+library("dplyr")
+library("data.table")
+library("matrixStats")
+```
+
+Now we will load Skeletal Muscle scRNAseq un-normalized data and have a look:
+
+```{r}
+expr <- suppressWarnings(as.data.frame(fread("unzip -p SkeletalMuscle_HumanChimp_10X.zip",sep="\t")))
+rownames(expr)<-expr$V1; expr$V1<-NULL;
+expr <- expr[rowSums(expr) != 0,]
+expr[1:5,1:5]
+print(paste0("DATASET CONTAINS ",dim(expr)[1]," GENES AND ",dim(expr)[2]," CELLS"))
+```
+
+As previously, we will exclude MALAT1 and ribosomal genes:
+
+```{r}
+expr<-expr[-which(rownames(expr)=="MALAT1"),]
+expr<-expr[grepl(paste0(c("^RPS","^RPL"),collapse="|"),rownames(expr))==FALSE,]
+```
+
+Now let us display mitochondrial genes:
+
+```{r}
+rownames(expr)[grepl("^MT\\.",rownames(expr))]
+```
+
+Here we are going to filter out the contaminated nuclei with >1% of their UMIs due to mitochondrial genes:
+
+```{r}
+mito_genes_expr_matrix <- expr[rownames(expr)[grepl("^MT\\.",rownames(expr))],]
+percent_mito_expr <- colSums(mito_genes_expr_matrix) / colSums(expr)
+expr[,names(percent_mito_expr[percent_mito_expr>0.01])] <- NULL
+```
+
+Now everything is ready for running the Seurat pipeline. We should not see lots of cells with mitochondrial contamination at the end.
+
+
+### Performing Quality Control
+
+The steps below encompass the standard pre-processing workflow for scRNA-seq data in Seurat. These represent the creation of a Seurat object, the selection and filtration of cells based on QC metrics, data normalization and scaling, and the detection of highly variable features.
+
+In order to proceed with Seurat pipeine we will have to convert the un-normalized expression matrix into Seurat object. We will keep all features expressed in >= 1 cells (~0.02% of the data) and keep all cells with at least 50 detected features:
+
+```{r}
+skm <- CreateSeuratObject(counts = expr, project = "SKM", min.cells = 1, min.features = 0, meta.data=data.frame(row.names=colnames(expr),orig.ident=matrix(unlist(strsplit(colnames(expr),"_")),ncol=2,byrow=TRUE)[,2]))
+skm@active.ident<-as.factor(skm$orig.ident)
+skm
+```
+
+The number of features and UMIs (nFeature_RNA and nCount_RNA) are automatically calculated for every object by Seurat.  For non-UMI data, nCount_RNA represents the sum of the non-normalized values within a cell i.e. library size. nFeature_RNA is a number of non-zero counts per cell. We calculate the percentage of mitochondrial features here and store it in object metadata as *percent.mito*. We use raw count data since this represents non-transformed and non-log-normalized counts. The % of UMI mapping to MT-features is a common scRNA-seq QC metric.
+
+```{r,fig.width=10,fig.height=8}
+mito.features <- grep(pattern = "^MT\\.", x = rownames(x = skm), value = TRUE)
+
+# Calculate % of mitochondrial genes per cell
+percent.mito <- Matrix::colSums(x = GetAssayData(object = skm, layer = 'counts')[mito.features, ]) / Matrix::colSums(x = GetAssayData(object = skm, layer = 'counts'))
+
+# The [[ operator can add columns to object metadata, and is a great place to stash QC stats
+skm[['percent.mito']] <- percent.mito
+VlnPlot(object = skm, features = c("nFeature_RNA", "nCount_RNA", "percent.mito"), ncol = 3)
+```
+
+Thus we have in average 200 genes detected per cell while a typical library size is 400-450. This is not a fantastic coverage but still tolerable for 10X data. Good news is that we do not seem to have many detected mitochondrial genes, i.e. they contribute less than 1% of the library sizes of the cells. Now we will check how nFeature_RNA is connected with nCount_RNA:
+
+```{r,fig.width=10,fig.height=8}
+FeatureScatter(object = skm, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+```
+
+We conclude that larger library sizes (nCount_RNA) give more detected genes per cell (nFeature_RNA). 
+
+Now we will normalize the data. By default, Seurat employs a global-scaling normalization method “LogNormalize” that normalizes the feature expression measurements for each cell by the total expression, multiplies this by a scale factor (10,000 by default), and log-transforms the result. However, one can also use a more recent and intelligent SCTransform normalization, https://pubmed.ncbi.nlm.nih.gov/31870423/, that regresses out the dependence of gene expression of sequencing depth individually for lowly, moderately and highly expressed genes.
+
+```{r}
+skm <- NormalizeData(object = skm, normalization.method = "LogNormalize", scale.factor = 1e4)
+```
+
+Now we will identify Highly Variable Genes (HVGs) wich will be used for dimensionality reduction. FindVariableFeatures calculates the average expression and dispersion for each feature, places these features into bins, and then calculates a z-score for dispersion within each bin. This helps control for the relationship between variability and average expression.
+
+```{r,fig.width=10,fig.height=8}
+skm <- FindVariableFeatures(object = skm, nfeatures = dim(skm)[1])
+```
+
+Thus we have `r length(x = VariableFeatures(object = skm))` Highly Variable Genes (HVGs) which we will use for further downstream analysis.
+
+
+### Principal Component Analysis (PCA)
+
+The single cell dataset likely contains "uninteresting" sources of variation. This could include not only technical noise, but batch effects, or even biological sources of variation (cell cycle stage). To mitigate the effect of these signals, Seurat constructs linear models to predict feature expression based on user-defined variables. The scaled z-scored residuals of these models are stored in the *scale.data* slot, and are used for dimensionality reduction and clustering.
+
+We can regress out cell-cell variation in feature expression driven by batch (if applicable), cell alignment rate (as provided by Drop-seq tools for Drop-seq data), the number of detected molecules, and mitochondrial feature expression. For cycling cells, we can also learn a "cell-cycle" score and regress this out as well. Here we regress on the number of detected molecules per cell.
+
+```{r scale}
+skm <- ScaleData(object = skm, features = rownames(x = skm), vars.to.regress = c("nCount_RNA","percent.mito"))
+```
+
+Next we will perform linear Dimensionality Reduction which is a Principal Component Analysis (PCA) in this case:
+
+```{r pca,fig.width=10,fig.height=8}
+skm <- RunPCA(object = skm, features = VariableFeatures(object = skm), verbose = FALSE)
+```
+
+We can see genes contributing to the loadings of the principal components. Let us now visualize loadings for the first two PCs:
+
+```{r,fig.width=10,fig.height=8}
+print(x = skm[['pca']], dims = 1:5, nfeatures = 5, projected = FALSE)
+VizDimLoadings(object = skm, dims = 1:2)
+```
+
+and display the PCA plot itself:
+
+```{r,fig.width=10,fig.height=8}
+DimPlot(object = skm, group.by="orig.ident", pt.size=1.2)
+skm <- ProjectDim(object = skm)
+```
+
+As we previously concluded from the Jack Straw procedure, PCs 1-5 are significant.
+
+
+
+### Dimensionality Reduction and Clustering
+
+Seurat uses graph-based clustering algorithm similar to Shared Nearest Neighbor (SNN). This method embeds cells in a graph structure - for example a K-nearest neighbor (KNN) graph, with edges drawn between cells with similar gene expression patterns, and then attempts to partition this graph into highly interconnected ‘quasi-cliques’ or ‘communities’. We first construct a KNN graph based on the euclidean distance in PCA space, and refine the edge weights between any two cells based on the shared overlap in their local neighborhoods (Jaccard similarity). To cluster the cells, we apply modularity optimization techniques such as the Louvain algorithm (default). 
+
+```{r}
+skm <- FindNeighbors(object = skm, dims = 1:5)
+skm <- FindClusters(object = skm, resolution = 0.3)
+```
+
+Here we perform dimensionality reduction with tSNE and color the identified clusters by the graph-based clustering algorithm.
+
+```{r tsne,fig.width=10,fig.height=8}
+opt_perp <- round(sqrt(length(skm@active.ident)),0)
+opt_perp
+skm <- RunTSNE(object = skm, dims = 1:5, perplexity = opt_perp, check_duplicates = FALSE)
+
+DimPlot(object = skm, reduction = 'tsne', pt.size=1.2, label=TRUE, label.size=8)
+DimPlot(object = skm, reduction = 'tsne', group.by="orig.ident", pt.size=1.2)
+DimPlot(object = skm, reduction = 'pca', pt.size=1.2)
+```
+
+It looks like human cells form two very distinct clusters, while the chimp cells are less obviously clustered into two blobs. The forths cluster where the human and chimp cells overlap might be some rare cell population or just poor quality cells, some more thorough analysis is needed here. Good news is that the cycling cells are spread homogeneously across all the clusters and do not form a separate cluster.
+
+Let us check the numbers of cells in each cluster:
+
+```{r}
+table(skm@active.ident)
+cell_assignment<-data.frame(CELL=names(skm@active.ident),CLUSTER=as.numeric(as.character(skm@active.ident)))
+print(head(cell_assignment))
+
+cell_human_assignment<-cell_assignment[cell_assignment$CLUSTER==1 | cell_assignment$CLUSTER==2,]
+cell_human_assignment<-cell_human_assignment[grepl("human",as.character(cell_human_assignment$CELL))==TRUE,]
+print(head(cell_human_assignment))
+expr_human<-subset(expr,select=colnames(expr)[colnames(expr)%in%as.character(cell_human_assignment$CELL)])
+
+cell_chimp_assignment<-cell_assignment[cell_assignment$CLUSTER==0 | cell_assignment$CLUSTER==3,]
+cell_chimp_assignment<-cell_chimp_assignment[grepl("chimp",as.character(cell_chimp_assignment$CELL))==TRUE,]
+print(head(cell_chimp_assignment))
+expr_chimp<-subset(expr,select=colnames(expr)[colnames(expr)%in%as.character(cell_chimp_assignment$CELL)])
+```
+
+The clustering is not very transparent implying that more thorough filtering is needed, alternatively, the cells look biologically very similar. We can assign final labels to clusters based on their gene markers:
+
+```{r,fig.width=10,fig.height=8}
+new.cluster.ids <- c("Chimp Fast Twitch", "Human Fast Twitch", "Human Slow Twitch", "Chimp Slow Twitch", "Unclear Cells", "Poor Quality Cells")
+names(x = new.cluster.ids) <- levels(x = skm)
+skm <- RenameIdents(object = skm, new.cluster.ids)
+DimPlot(object = skm, reduction = 'tsne', label = TRUE, pt.size=1, label.size=6) + NoLegend()
+```
+
+
+### Differential Gene Expression (DGE) Analysis with DESeq2
+
+In this section, we compare human fast-twitch and slow-twitch skeletal muscle nuclei using the cluster annotation created above. In the original clustering, `CLUSTER == 1` corresponds to **Human Fast Twitch** and `CLUSTER == 2` corresponds to **Human Slow Twitch**. We use the original, un-normalized count matrix `expr`, not Seurat's log-normalized expression values.
+
+For this requested analysis, each nucleus is treated as one observation in DESeq2. This is useful as an exploratory cell-level comparison, but there is an important statistical limitation: nuclei from the same donor are not independent biological replicates. If the data include multiple donors, a model that accounts for donor-level replication (or a pseudobulk analysis) is generally needed for population-level inference. Treat the p-values here as potentially over-optimistic if donor identity is not modelled.
+
+First, assemble the count matrix and confirm the cluster labels and number of nuclei in each group.
+
+```{r}
+library("DESeq2")
+
+# The annotation table was created earlier in this notebook.
+# CLUSTER 1 = Human Fast Twitch; CLUSTER 2 = Human Slow Twitch.
+human_fibre_assignment <- cell_human_assignment[cell_human_assignment$CLUSTER %in% c(1, 2), ]
+
+human_fibre_assignment$FIBRE_TYPE<-ifelse(human_fibre_assignment$CLUSTER == 1, "Human_Fast_Twitch", "Human_Slow_Twitch")
+
+table(human_fibre_assignment$FIBRE_TYPE)
+head(human_fibre_assignment)
+```
+
+Now select the corresponding columns from the raw expression matrix. Matching by cell name ensures that the count columns and the annotation rows are in exactly the same order.
+
+```{r}
+human_cells <- as.character(human_fibre_assignment$CELL)
+
+# Keep only cells present in the expression matrix.
+human_cells <- human_cells[human_cells %in% colnames(expr)]
+human_fibre_assignment <- human_fibre_assignment[match(human_cells, human_fibre_assignment$CELL), ]
+
+counts_human_fibres <- as.matrix(expr[, human_cells, drop = FALSE])
+storage.mode(counts_human_fibres) <- "numeric"
+counts_human_fibres[1:5,1:5]
+dim(counts_human_fibres)
+
+# DESeq2 requires non-negative integer counts.
+stopifnot(all(is.finite(counts_human_fibres)))
+stopifnot(all(counts_human_fibres >= 0))
+stopifnot(all(abs(counts_human_fibres - round(counts_human_fibres)) < 1e-8))
+counts_human_fibres <- round(counts_human_fibres)
+storage.mode(counts_human_fibres) <- "integer"
+counts_human_fibres[1:5,1:5]
+dim(counts_human_fibres)
+
+# Remove genes with no counts across the selected nuclei.
+counts_human_fibres <- counts_human_fibres[rowSums(counts_human_fibres) > 0, , drop = FALSE]
+counts_human_fibres[1:5,1:5]
+dim(counts_human_fibres)
+
+sample_info <- data.frame(row.names = human_fibre_assignment$CELL,fibre_type = factor(human_fibre_assignment$FIBRE_TYPE, levels = c("Human_Slow_Twitch", "Human_Fast_Twitch")))
+head(sample_info)
+
+stopifnot(identical(colnames(counts_human_fibres), rownames(sample_info)))
+table(sample_info$fibre_type)
+dim(counts_human_fibres)
+```
+
+We now fit the standard DESeq2 negative-binomial model. The contrast is **Human Fast Twitch versus Human Slow Twitch**. A positive log2 fold change means higher expression in fast-twitch nuclei; a negative value means higher expression in slow-twitch nuclei.
+
+```{r}
+dds <- DESeqDataSetFromMatrix(countData = counts_human_fibres, colData = sample_info, design = ~ fibre_type)
+
+# Filter out genes with very little information for the comparison.
+keep <- rowSums(counts(dds) >= 5) >= 1
+dds <- dds[keep, ]
+
+dds <- DESeq(dds, sfType = "poscounts")
+
+res <- results(dds, contrast = c("fibre_type", "Human_Fast_Twitch", "Human_Slow_Twitch"))
+
+res_df <- as.data.frame(res)
+res_df$gene <- rownames(res_df)
+res_df <- res_df[order(res_df$padj, na.last = TRUE), ]
+
+# Show the most significant genes.
+head(res_df[, c("gene", "baseMean", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj")], 20)
+
+# Number of genes passing a nominal 5% adjusted-p-value threshold.
+sum(res_df$padj < 0.05, na.rm = TRUE)
+```
+
+Visualise the expression of the expected fibre-type markers. These genes are useful biological checks, but the direction and significance should be determined from the actual output rather than assumed in advance.
+
+```{r, fig.width=10, fig.height=6}
+marker_genes <- intersect(c("TNNC2", "MYBPC1", "ACTA1", "TNNT3", "MYH7", "TNNT1"), rownames(dds))
+
+if (length(marker_genes) > 0) {
+  plotCounts(dds, gene = marker_genes[1],
+             intgroup = "fibre_type", returnData = FALSE)
+  # A separate plot for each marker makes the group distributions easier to inspect.
+  for (gene in marker_genes) {
+    print(
+      ggplot2::ggplot(
+        plotCounts(dds, gene = gene, intgroup = "fibre_type",
+                   returnData = TRUE),
+        ggplot2::aes(x = fibre_type, y = count)
+      ) +
+        ggplot2::geom_boxplot(outlier.shape = NA) +
+        ggplot2::geom_jitter(width = 0.15, alpha = 0.4, size = 1) +
+        ggplot2::scale_y_log10() +
+        ggplot2::labs(title = gene, x = NULL,
+                      y = "Normalised count (log scale)") +
+        ggplot2::theme_bw()
+    )
+  }
+}
+```
+
+A volcano plot provides a compact overview of effect size and statistical evidence.
+
+```{r, fig.width=8, fig.height=6}
+library("ggrepel")
+
+res_plot <- res_df
+res_plot$label <- res_plot$gene
+res_plot$neg_log10_padj <- -log10(pmax(res_plot$padj, .Machine$double.xmin))
+res_plot$significance <- ifelse(!is.na(res_plot$padj) & res_plot$padj < 0.05 & abs(res_plot$log2FoldChange) >= 1, "Adjusted p < 0.05 and |log2FC| >= 1", "Other genes")
+
+ggplot2::ggplot(
+  res_plot[is.finite(res_plot$log2FoldChange) &
+             is.finite(res_plot$neg_log10_padj), ],
+  ggplot2::aes(x = log2FoldChange, y = neg_log10_padj,
+               colour = significance)) +
+  ggplot2::geom_point(alpha = 0.65, size = 2) +
+  ggplot2::geom_vline(xintercept = c(-1, 1), linetype = "dashed") +
+  ggplot2::geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+  ggrepel::geom_text_repel(ggplot2::aes(label = label), size = 3, max.overlaps = Inf, show.legend = FALSE, na.rm = TRUE) +
+  ggplot2::labs(
+    title = "Human fast-twitch versus slow-twitch nuclei",
+    x = "log2 fold change (fast / slow)",
+    y = "-log10 adjusted p-value",
+    colour = NULL
+  ) +
+  ggplot2::theme_bw()
+```
+
+The comparison cleanly recovers the canonical fast/slow fibre-type signature — TNNT3 up in fast; TNNT1 and MYH7 up in slow — with several additional muscle genes (MYBPC1, TNNC2, NEB, TRDN, ACTA1) shifting in the expected direction just below the 2-fold cutoff, while TTN, NEAT1 and MIR133A1HG are essentially unchanged.
+
+
+### Pathway and Gene Set Enrichment (GSEA) Analysis
+
+Differential expression gives a gene-by-gene result. Pathway analysis asks whether genes belonging to a known biological process are over-represented among the differentially expressed genes, while Gene Set Enrichment Analysis (GSEA) tests whether members of a pathway tend to accumulate near the top or bottom of a ranked genome-wide gene list. GSEA can detect coordinated shifts even when individual genes do not pass a strict significance threshold.
+
+We will use two complementary approaches:
+
+1. **KEGG over-representation analysis (ORA)** on genes selected using adjusted p-values.
+2. **GSEA with `fgsea`** using MSigDB Hallmark gene sets and the DESeq2 Wald statistic to rank genes. This avoids choosing an arbitrary cut-off for the GSEA input.
+
+Install any missing packages once, if needed, before running the notebook.
+
+```{r}
+# Run only if a package is missing:
+# install.packages(c("BiocManager", "msigdbr", "fgsea", "ggplot2"))
+# BiocManager::install(c("clusterProfiler", "org.Hs.eg.db"))
+
+library("clusterProfiler")
+library("org.Hs.eg.db")
+library("msigdbr")
+library("fgsea")
+library("ggplot2")
+```
+
+#### KEGG pathway over-representation analysis
+
+KEGG pathway analysis requires Entrez Gene identifiers. We map the significant gene symbols to Entrez IDs and test whether KEGG pathways contain more significant genes than expected. This analysis depends on the significance threshold, so report the threshold together with the results.
+
+```{r}
+significant_genes <- res_df$gene[!is.na(res_df$padj) & res_df$padj < 0.1]
+
+if (length(significant_genes) >= 5) {
+  gene_map <- bitr(unique(significant_genes),fromType = "SYMBOL",toType = "ENTREZID",OrgDb = org.Hs.eg.db)
+
+  # Use all tested genes as the background universe.
+  background_map <- bitr(rownames(dds),fromType = "SYMBOL",toType = "ENTREZID",OrgDb = org.Hs.eg.db)
+
+  kegg_ora <- enrichKEGG(gene = unique(gene_map$ENTREZID),universe = unique(background_map$ENTREZID),organism = "hsa",pAdjustMethod = "BH",qvalueCutoff = 0.05, minGSSize = 5,maxGSSize = 2000)
+
+  as.data.frame(kegg_ora) |> head(20)
+  if (nrow(as.data.frame(kegg_ora)) > 0) {
+    print(dotplot(kegg_ora, showCategory = 15) +
+            ggplot2::ggtitle("KEGG over-representation: fast versus slow"))
+  }
+} else {
+  message("Fewer than five genes passed adjusted p < 0.05; KEGG ORA skipped. ",
+          "Consider the GSEA results below, which use all ranked genes.")
+}
+```
+
+#### Gene Set Enrichment Analysis with fgsea
+
+For GSEA, we rank every tested gene by the signed DESeq2 Wald statistic. Positive values indicate higher expression in fast-twitch nuclei; negative values indicate higher expression in slow-twitch nuclei. The Hallmark collection contains curated gene sets representing broad biological processes. Here we use it as a robust, interpretable starting point; other MSigDB collections can be substituted.
+
+```{r}
+# Prepare a ranked vector, retaining one score per gene and excluding missing scores.
+ranked_genes <- res_df$stat
+names(ranked_genes) <- res_df$gene
+ranked_genes <- ranked_genes[is.finite(ranked_genes)]
+ranked_genes <- sort(ranked_genes, decreasing = TRUE)
+
+# Remove duplicated gene symbols if any occur.
+ranked_genes <- ranked_genes[!duplicated(names(ranked_genes))]
+
+# Obtain human Hallmark gene sets from MSigDB.
+hallmark_tbl <- msigdbr(species = "Homo sapiens", collection = "H")
+
+hallmark_pathways <- split(hallmark_tbl$gene_symbol, hallmark_tbl$gs_name)
+
+set.seed(1)
+fgsea_res <- fgseaMultilevel(pathways = hallmark_pathways,stats = ranked_genes, minSize = 3, maxSize = 500)
+
+fgsea_res <- as.data.frame(fgsea_res)
+fgsea_res <- fgsea_res[order(fgsea_res$padj), ]
+
+fgsea_res[, c("pathway", "NES", "pval", "padj", "size")] |> head(20)
+```
+
+Plot the most significant gene sets. A positive Normalized Enrichment Score (NES) means that the pathway tends to be enriched among genes expressed more highly in fast-twitch nuclei; a negative NES means enrichment toward slow-twitch nuclei.
+
+```{r, fig.width=10, fig.height=7}
+fgsea_sig <- fgsea_res[!is.na(fgsea_res$padj) & fgsea_res$padj < 1, ]
+
+if (nrow(fgsea_sig) > 0) {
+  fgsea_sig <- fgsea_sig[order(abs(fgsea_sig$NES), decreasing = TRUE), ]
+  fgsea_top <- head(fgsea_sig, 20)
+  fgsea_top$pathway <- factor(
+    fgsea_top$pathway,
+    levels = fgsea_top$pathway[order(fgsea_top$NES)]
+  )
+
+  print(
+    ggplot2::ggplot(
+      fgsea_top,
+      ggplot2::aes(x = NES, y = pathway, size = size, colour = padj)
+    ) +
+      ggplot2::geom_point() +
+      ggplot2::labs(
+        title = "Hallmark GSEA: human fast-twitch versus slow-twitch nuclei",
+        x = "Normalised Enrichment Score (NES)",
+        y = NULL,
+        colour = "Adjusted p-value",
+        size = "Genes in set"
+      ) +
+      ggplot2::theme_bw()
+  )
+} else {
+  message("No Hallmark gene sets passed adjusted p < 0.05. ",
+          "Inspect the top-ranked pathways cautiously, without treating them as significant.")
+}
+```
+
+For a closer look at an individual pathway, choose one of the pathway names in `fgsea_res$pathway`. The enrichment plot shows whether genes in that set concentrate toward the fast-twitch or slow-twitch end of the ranked list.
+
+```{r}
+if (nrow(fgsea_res) > 0) {
+  best_pathway <- fgsea_res$pathway[1]
+  message("Top-ranked pathway: ", best_pathway)
+  print(fgsea::plotEnrichment(
+    hallmark_pathways[[best_pathway]],
+    ranked_genes
+  ) + ggplot2::ggtitle(best_pathway))
+}
+```
+
+#### How to discuss the pathway results
+
+Use the actual `kegg_ora` and `fgsea_res` output after running the notebook; the pathway results cannot be known from the notebook code alone. Focus on:
+
+- whether significant pathways are biologically consistent with contractile fibre identity, calcium handling, energy metabolism, and muscle-fibre specialisation;
+- whether the NES direction agrees with the genes driving the fast-versus-slow contrast;
+- whether the same biological theme appears in both KEGG ORA and fgsea, which provides complementary support;
+- the adjusted p-values, pathway sizes, and leading-edge genes, rather than pathway names alone.
+
+A pathway result is an enrichment signal, not proof that the pathway is activated or inhibited. Also, because the requested DESeq2 model treats individual nuclei as independent observations, the p-values and downstream enrichment significance may be anti-conservative if donor-to-donor variability is not accounted for. Interpret the findings as exploratory unless the biological replication structure supports this model.
+
+
+
+### Display session information
+
+```{r}
+sessionInfo()
+```
+
