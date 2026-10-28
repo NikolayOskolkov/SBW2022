@@ -74,6 +74,7 @@ By completing this course, you will:
 | 18.30 - 19.30  | Practical: coding PCA and Multi-Dimensional Scaling (MDS) from scratch                     | [Lab](https://html-preview.github.io/?url=https://github.com/NikolayOskolkov/PopGen_PopStructure/blob/main/practicals/Day2/pca_mds_toy_example.html)                                                                     |
 | 18.30 - 20.30  | Practical: practicing PCA, MDS, tSNE and UMAP                                              | [Lab](https://html-preview.github.io/?url=https://github.com/NikolayOskolkov/PopGen_PopStructure/blob/main/practicals/Day2/Dimension_Reduction_tutorial.html)                                                            |
 | 19.00 - 20.30  | Practical: dimensionality reduction of scRNAseq data via Seurat workflow                   | [Lab](https://html-preview.github.io/?url=https://github.com/NikolayOskolkov/SBW2022/blob/main/practicals/SeuratWorkflow/SBW2022_Lab_SkeletalMuscle_snRNAseq_Seurat.html)                                               |
+| 19.00 - 20.30  | Practical: differential gene expression, pathway and gene set enrichment analyses          | [Lab](https://html-preview.github.io/?url=https://github.com/NikolayOskolkov/SBW2022/blob/main/practicals/DEseq2_DGE_GSEA/SBW2022_Lab_SkeletalMuscle_snRNAseq_Seurat_DGE_GSEA.html)                                               |
 | 20.30 - 21.00  | Questions and discussion                                                                   |
 
 
